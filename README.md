@@ -1,6 +1,8 @@
 # vector-memory
 
-Semantic vector search MCP server for GitHub Copilot CLI session history. Gives Copilot persistent long-term memory across sessions using local embeddings and vector search.
+An [MCP](https://modelcontextprotocol.io/) server that adds semantic vector search to [**GitHub Copilot CLI**](https://docs.github.com/en/copilot/github-copilot-in-the-cli) (`github-copilot-cli`). Gives Copilot persistent long-term memory across sessions using local embeddings and vector search.
+
+> **Note:** This is a community project and is not affiliated with or endorsed by GitHub. [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli) is a product of GitHub / Microsoft.
 
 ## Architecture
 
