@@ -1,0 +1,178 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { join, dirname } from "path";
+import { homedir } from "os";
+import { fileURLToPath } from "url";
+import { spawn } from "child_process";
+import { existsSync, readFileSync } from "fs";
+import { request } from "http";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const COPILOT_DIR = join(homedir(), ".copilot");
+const PORT = 31337;
+const SERVER_URL = `http://127.0.0.1:${PORT}`;
+const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
+
+// --- Check if server is running ---
+
+function ping() {
+  return new Promise((resolve) => {
+    const req = request(`${SERVER_URL}/ping`, { method: "POST", timeout: 2000 }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString());
+          resolve(body.ok === true);
+        } catch {
+          resolve(false);
+        }
+      });
+    });
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.end(JSON.stringify({}));
+  });
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureServer() {
+  // Check if already running
+  if (await ping()) return;
+
+  // Check stale pidfile
+  if (existsSync(PID_FILE)) {
+    const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
+    if (!isNaN(pid) && !isProcessAlive(pid)) {
+      // Stale pid, server is dead
+    } else if (!isNaN(pid) && isProcessAlive(pid)) {
+      // Process exists but not responding to ping yet — wait a bit
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        if (await ping()) return;
+      }
+    }
+  }
+
+  // Launch server detached
+  const serverPath = join(__dirname, "vector-memory-server.js");
+  const child = spawn(process.execPath, [serverPath], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+
+  // Wait for it to be ready
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (await ping()) return;
+  }
+  throw new Error("Vector memory server failed to start within 30s");
+}
+
+// --- HTTP client helper ---
+
+function callServer(path, body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = request(`${SERVER_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
+      timeout: 120000,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString()));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Request timeout")); });
+    req.end(data);
+  });
+}
+
+// --- Start: ensure server, then expose MCP tools ---
+
+await ensureServer();
+
+const server = new McpServer({
+  name: "vector-memory",
+  version: "1.0.0",
+});
+
+server.tool(
+  "vector_search",
+  "Semantic search across all past GHCP session history. Use this for finding past conversations, " +
+    "code changes, decisions, and context by meaning — not just keywords. Returns ranked results " +
+    "with similarity scores. Much better than FTS5 keyword search for conceptual queries.",
+  {
+    query: z.string().describe("Natural language search query — what are you looking for?"),
+    limit: z
+      .number()
+      .min(1)
+      .max(50)
+      .default(10)
+      .describe("Max results to return (default 10)"),
+  },
+  async ({ query, limit }) => {
+    try {
+      const results = await callServer("/search", { query, limit });
+
+      if (results.error) {
+        return { content: [{ type: "text", text: `Error: ${results.error}` }] };
+      }
+      if (!results.length || results.length === 0) {
+        return { content: [{ type: "text", text: "No results found." }] };
+      }
+
+      const formatted = results
+        .map(
+          (r, i) =>
+            `**#${i + 1}** (score: ${r.score}, type: ${r.source_type}, session: ${r.session_id})\n${r.snippet}`
+        )
+        .join("\n\n---\n\n");
+
+      return { content: [{ type: "text", text: formatted }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Vector search unavailable: ${err.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "vector_reindex",
+  "Force a full reindex of the vector search database. Normally not needed — " +
+    "vector_search auto-indexes new content. Use this if the index seems stale or corrupted.",
+  {},
+  async () => {
+    try {
+      const result = await callServer("/reindex", {});
+      if (result.error) {
+        return { content: [{ type: "text", text: `Error: ${result.error}` }] };
+      }
+      return {
+        content: [{ type: "text", text: `Reindexed ${result.count} items into vector search database.` }],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Reindex unavailable: ${err.message}` }] };
+    }
+  }
+);
+
+const transport = new StdioServerTransport();
+await server.connect(transport);

@@ -1,0 +1,128 @@
+# vector-memory
+
+Semantic vector search MCP server for GitHub Copilot CLI session history. Gives Copilot persistent long-term memory across sessions using local embeddings and vector search.
+
+## Architecture
+
+```
+copilot.exe ──STDIO──▶ index.js (proxy) ──HTTP──▶ vector-memory-server.js (singleton)
+                                                          │
+                                                   embed-worker.js (worker thread)
+                                                          │
+                                                   Xenova/gte-small (ONNX, 34MB)
+```
+
+- **index.js** — Thin STDIO MCP proxy. One per copilot instance. Checks if the HTTP server is running, launches it if not, then ferries tool calls over HTTP.
+- **vector-memory-server.js** — Singleton HTTP server on `localhost:31337`. Owns the embedding model (one copy in memory), SQLite vector DB, and background indexing.
+- **embed-worker.js** — Worker thread that loads the ONNX model and handles embedding inference off the main thread.
+- **lib.js** — Pure logic extracted for testability: filtering, dedup, post-processing, process detection.
+
+### Key design decisions
+
+- **Singleton**: Only one server runs regardless of how many copilot instances are open. Saves ~200MB RAM per additional instance.
+- **Race condition hardened**: EADDRINUSE detection with full diagnostics — distinguishes between healthy singleton, zombie process, and foreign port conflict.
+- **No duplicates**: `UNIQUE` constraint + `INSERT OR IGNORE` + `isIndexing` guard prevents duplicate embeddings even under concurrent access.
+- **Lazy init**: ONNX model only loads after winning the singleton race. Losers exit in ~500ms.
+
+## Prerequisites
+
+| Requirement | Version | Install |
+|---|---|---|
+| Node.js | ≥18.x | `winget install OpenJS.NodeJS.LTS` or [nodejs.org](https://nodejs.org) |
+| npm | (comes with Node) | — |
+| Python build tools¹ | — | `npm install -g windows-build-tools` (Windows) |
+| C++ compiler¹ | — | Visual Studio Build Tools with "Desktop C++" workload |
+
+¹ Required by `better-sqlite3` and `sqlite-vec` native modules. On macOS, `xcode-select --install` covers both.
+
+## Installation
+
+```bash
+cd ~/.copilot/mcp-servers/vector-memory
+npm install
+```
+
+The ONNX embedding model (`Xenova/gte-small`, ~34MB) downloads automatically on first run.
+
+### Register with Copilot CLI
+
+Add to `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "vector-memory": {
+      "command": "node",
+      "args": ["C:/Users/<you>/.copilot/mcp-servers/vector-memory/index.js"]
+    }
+  }
+}
+```
+
+## Tools
+
+| Tool | Description |
+|---|---|
+| `vector_search` | Semantic search across all past session history. Returns ranked results with similarity scores. |
+| `vector_reindex` | Force a full rebuild of the vector index. Normally not needed — search auto-indexes new content. |
+
+## Data flow
+
+1. Copilot CLI writes session data to `~/.copilot/session-store.db` (FTS5 search index)
+2. vector-memory reads from that DB (read-only) and creates embeddings
+3. Embeddings are stored in `~/.copilot/vector-index.db` (sqlite-vec)
+4. Indexing triggers: on startup, on each search (if idle), and every 15 minutes
+
+## Scripts
+
+```bash
+npm run lint     # ESLint on all source files
+npm test         # 38 unit tests (node:test, zero external deps)
+npm run check    # lint + test
+```
+
+## Running tests
+
+```bash
+cd ~/.copilot/mcp-servers/vector-memory
+npm test
+```
+
+With coverage:
+
+```bash
+node --test --experimental-test-coverage test.js
+```
+
+## Manual server management
+
+```bash
+# Start server directly (normally done by the proxy)
+node vector-memory-server.js
+
+# Check if running
+curl -X POST http://127.0.0.1:31337/ping -d "{}"
+
+# Search directly
+curl -X POST http://127.0.0.1:31337/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"what did I work on yesterday","limit":5}'
+
+# Kill server (find PID first)
+cat ~/.copilot/vector-memory.pid
+```
+
+## File overview
+
+| File | Purpose |
+|---|---|
+| `index.js` | STDIO MCP proxy — what copilot.exe launches |
+| `vector-memory-server.js` | HTTP singleton — owns model, DB, indexing |
+| `embed-worker.js` | Worker thread for ONNX embedding inference |
+| `lib.js` | Pure logic: filtering, dedup, scoring, handler factory |
+| `test.js` | 38 unit tests with DI mocks |
+| `eslint.config.js` | Lint config |
+
+## License
+
+MIT — see [LICENSE](LICENSE).

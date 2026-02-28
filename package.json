@@ -1,0 +1,27 @@
+{
+  "name": "vector-memory-mcp",
+  "version": "1.0.0",
+  "description": "Semantic vector search MCP server for GitHub Copilot CLI session history",
+  "main": "index.js",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP.git"
+  },
+  "scripts": {
+    "lint": "eslint index.js vector-memory-server.js embed-worker.js lib.js",
+    "test": "node --test test.js",
+    "check": "npm run lint && npm run test"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
+    "sqlite-vec": "^0.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.2"
+  }
+}
