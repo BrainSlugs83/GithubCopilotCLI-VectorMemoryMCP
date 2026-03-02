@@ -156,7 +156,7 @@ async function search(vecDb, query, limit = 10) {
 
 // --- HTTP Server (singleton, port 31337) ---
 
-const PORT = 31337;
+const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || "31337", 10);
 
 const handleRequest = createHandler({
   openVectorDb,
