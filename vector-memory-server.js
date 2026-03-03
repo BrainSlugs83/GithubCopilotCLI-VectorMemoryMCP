@@ -14,6 +14,10 @@ const COPILOT_DIR = join(homedir(), ".copilot");
 const SESSION_STORE_PATH = join(COPILOT_DIR, "session-store.db");
 const VECTOR_INDEX_PATH = join(COPILOT_DIR, "vector-index.db");
 const INDEX_INTERVAL_MS = 15 * 60 * 1000;
+// Idle timeout: minutes. 0 or negative = disabled. Default 5 min.
+const IDLE_TIMEOUT_MINUTES = parseFloat(process.env.VECTOR_MEMORY_IDLE_TIMEOUT || "5");
+const IDLE_TIMEOUT_MS = IDLE_TIMEOUT_MINUTES > 0 ? IDLE_TIMEOUT_MINUTES * 60_000 : 0;
+const IDLE_CHECK_MS = 60_000; // check every 60s
 
 let isIndexing = false;
 
@@ -131,6 +135,7 @@ async function backgroundIndex() {
       sessionDb.close();
       if (unindexed.length > 0) {
         await indexContent(vecDb, unindexed);
+        lastActivity = Date.now(); // new content = someone's using copilot
       }
     } finally {
       vecDb.close();
@@ -175,6 +180,14 @@ const handleRequest = createHandler({
   getIsIndexing: () => isIndexing,
   setIsIndexing: (v) => { isIndexing = v; },
 });
+
+let lastActivity = Date.now();
+
+// Wrap handler to track activity on every request
+function trackedHandler(req, res) {
+  lastActivity = Date.now();
+  return handleRequest(req, res);
+}
 
 // --- Port conflict resolution ---
 
@@ -249,7 +262,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- Startup ---
 
-const httpServer = createServer(handleRequest);
+const httpServer = createServer(trackedHandler);
 
 try {
   await tryListen(httpServer);
@@ -296,7 +309,7 @@ try {
 
   // Retry
   try {
-    const retryServer = createServer(handleRequest);
+    const retryServer = createServer(trackedHandler);
     await tryListen(retryServer);
     const pidFile = join(COPILOT_DIR, "vector-memory.pid");
     writeFileSync(pidFile, process.pid.toString());
@@ -320,6 +333,17 @@ initWorker();
 }
 backgroundIndex();
 setInterval(backgroundIndex, INDEX_INTERVAL_MS);
+
+// --- Idle shutdown ---
+if (IDLE_TIMEOUT_MS > 0) {
+  setInterval(() => {
+    const idle = Date.now() - lastActivity;
+    if (idle >= IDLE_TIMEOUT_MS) {
+      process.stderr.write(`[vector-memory] Idle for ${Math.round(idle / 1000)}s — shutting down.\n`);
+      cleanup();
+    }
+  }, IDLE_CHECK_MS);
+}
 
 // Cleanup on exit
 function cleanup() {

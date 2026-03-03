@@ -25,6 +25,8 @@ copilot.exe ──STDIO──▶ index.js (proxy) ──HTTP──▶ vector-mem
 - **Race condition hardened**: EADDRINUSE detection with full diagnostics — distinguishes between healthy singleton, zombie process, and foreign port conflict.
 - **No duplicates**: `UNIQUE` constraint + `INSERT OR IGNORE` + `isIndexing` guard prevents duplicate embeddings even under concurrent access.
 - **Lazy init**: ONNX model only loads after winning the singleton race. Losers exit in ~500ms.
+- **Idle shutdown**: Server exits after 5 minutes of inactivity (no requests and no new session content). The proxy re-launches it on next use.
+- **Self-healing**: Detects and deletes corrupt/truncated model files, re-downloads automatically. Retries with backoff for Windows Defender file locks.
 
 ## Prerequisites
 
@@ -60,6 +62,63 @@ Add to `~/.copilot/mcp-config.json`:
   }
 }
 ```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `VECTOR_MEMORY_PORT` | `31337` | HTTP port for the singleton server. Change this to run independent instances per user. |
+| `VECTOR_MEMORY_IDLE_TIMEOUT` | `5` | Minutes of inactivity before the server shuts down. `0` or negative = never shut down. |
+
+Set these in the `env` block of `mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "vector-memory": {
+      "command": "node",
+      "args": ["C:/Users/<you>/.copilot/mcp-servers/vector-memory/index.js"],
+      "env": {
+        "VECTOR_MEMORY_PORT": "31338",
+        "VECTOR_MEMORY_IDLE_TIMEOUT": "10"
+      }
+    }
+  }
+}
+```
+
+#### Multi-user setup
+
+On a shared machine, each user needs their own port to keep session history isolated (the vector index lives in each user's `~/.copilot/`). Point both configs at the same codebase:
+
+**User A** (`~/.copilot/mcp-config.json`) — uses default port 31337:
+```json
+{
+  "mcpServers": {
+    "vector-memory": {
+      "command": "node",
+      "args": ["D:/shared/vector-memory/index.js"]
+    }
+  }
+}
+```
+
+**User B** (`~/.copilot/mcp-config.json`) — uses port 31338:
+```json
+{
+  "mcpServers": {
+    "vector-memory": {
+      "command": "node",
+      "args": ["D:/shared/vector-memory/index.js"],
+      "env": {
+        "VECTOR_MEMORY_PORT": "31338"
+      }
+    }
+  }
+}
+```
+
+Each user gets their own singleton server, their own vector index, and their own session history. The idle timeout ensures servers shut down automatically when not in use.
 
 ## Tools
 
