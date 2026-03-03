@@ -3,7 +3,7 @@ import * as sqliteVec from "sqlite-vec";
 import { Worker } from "worker_threads";
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { existsSync, writeFileSync, unlinkSync, readFileSync, statSync } from "fs";
+import { existsSync, writeFileSync, unlinkSync, readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { createServer, request as httpReq } from "http";
 import { execSync } from "child_process";
@@ -341,11 +341,6 @@ setInterval(backgroundIndex, INDEX_INTERVAL_MS);
 // --- Idle shutdown ---
 if (IDLE_TIMEOUT_MS > 0) {
   setInterval(() => {
-    // If session-store.db was recently modified, count as activity
-    try {
-      const mtime = statSync(SESSION_STORE_PATH).mtimeMs;
-      if (mtime > lastActivity) lastActivity = mtime;
-    } catch {}
     const idle = Date.now() - lastActivity;
     if (idle >= IDLE_TIMEOUT_MS) {
       process.stderr.write(`[vector-memory] Idle for ${Math.round(idle / 1000)}s — shutting down.\n`);

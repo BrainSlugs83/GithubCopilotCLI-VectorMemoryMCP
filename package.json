@@ -1,6 +1,6 @@
 {
   "name": "vector-memory-mcp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Semantic vector search MCP server for GitHub Copilot CLI session history",
   "main": "index.js",
   "type": "module",

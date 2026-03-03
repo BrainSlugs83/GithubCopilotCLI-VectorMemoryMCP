@@ -147,6 +147,33 @@ function callServer(path, body) {
   });
 }
 
+// Auto-relaunch wrapper: retries once after ensureServer on connection failure
+async function callServerWithRetry(path, body) {
+  try {
+    return await callServer(path, body);
+  } catch (err) {
+    if (err.message && (err.message.includes("ECONNREFUSED") || err.message.includes("ECONNRESET"))) {
+      startupError = null;
+      await ensureServer();
+      return await callServer(path, body);
+    }
+    throw err;
+  }
+}
+
+// --- Keepalive: ping server every 2 minutes to prevent idle shutdown ---
+const KEEPALIVE_MS = 2 * 60_000;
+setInterval(async () => {
+  try {
+    const result = await ping();
+    if (!result) {
+      // Server died — relaunch it
+      startupError = null;
+      await ensureServer();
+    }
+  } catch {}
+}, KEEPALIVE_MS);
+
 // --- Start: ensure server, then expose MCP tools ---
 
 let startupError = null;
@@ -180,7 +207,7 @@ server.tool(
       return { content: [{ type: "text", text: `⚠ vector-memory misconfigured: ${startupError}` }] };
     }
     try {
-      const results = await callServer("/search", { query, limit });
+      const results = await callServerWithRetry("/search", { query, limit });
 
       if (results.error) {
         return { content: [{ type: "text", text: `Error: ${results.error}` }] };
@@ -213,7 +240,7 @@ server.tool(
       return { content: [{ type: "text", text: `⚠ vector-memory misconfigured: ${startupError}` }] };
     }
     try {
-      const result = await callServer("/reindex", {});
+      const result = await callServerWithRetry("/reindex", {});
       if (result.error) {
         return { content: [{ type: "text", text: `Error: ${result.error}` }] };
       }
