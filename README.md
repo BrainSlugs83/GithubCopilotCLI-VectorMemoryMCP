@@ -184,6 +184,83 @@ cat ~/.copilot/vector-memory.pid
 | `test.js` | 38 unit tests with DI mocks |
 | `eslint.config.js` | Lint config |
 
+## Troubleshooting
+
+### Port owned by another user
+
+**Error:** `Port 31337 is owned by user "X" (expected "Y")`
+
+Two users on the same machine are pointing at the same port. Each user needs a unique port. Edit `~/.copilot/mcp-config.json` and add a `VECTOR_MEMORY_PORT` env var:
+
+```json
+{
+  "mcpServers": {
+    "vector-memory": {
+      "command": "node",
+      "args": ["<path-to>/index.js"],
+      "env": {
+        "VECTOR_MEMORY_PORT": "31338"
+      }
+    }
+  }
+}
+```
+
+See [Multi-user setup](#multi-user-setup) for full details.
+
+### Port occupied by another service
+
+**Error:** `Vector memory server failed to start — port 31337 may be in use by another service`
+
+Something else is listening on the default port. Pick a different port using the same `VECTOR_MEMORY_PORT` env var as above.
+
+To check what's on the port:
+```bash
+# Windows
+netstat -ano | findstr :31337
+
+# macOS/Linux
+lsof -i :31337
+```
+
+### Version mismatch
+
+**Warning:** `server version X ≠ proxy version Y`
+
+An older server is still running from before an update. Kill it and let the proxy spawn a fresh one:
+
+```bash
+# Find and kill the server
+cat ~/.copilot/vector-memory.pid   # get the PID
+kill <PID>                          # or Stop-Process -Id <PID> on Windows
+```
+
+The next copilot launch will start the updated server automatically.
+
+### Session store not found
+
+**Error:** `Session store not found`
+
+The file `~/.copilot/session-store.db` doesn't exist yet. This is normal on a fresh install — Copilot CLI creates it after your first conversation. Use copilot for a bit, then try again.
+
+### Embedding model corrupt
+
+**Symptom:** Server starts but search returns no results or errors.
+
+The ONNX model file may be corrupt (e.g., interrupted download). The server self-heals on restart — kill the server and let it re-launch:
+
+```bash
+cat ~/.copilot/vector-memory.pid
+kill <PID>
+```
+
+If it persists, delete the model cache and reinstall:
+
+```bash
+rm -rf node_modules/@huggingface/transformers/.cache
+npm run postinstall
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

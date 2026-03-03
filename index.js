@@ -45,7 +45,7 @@ function validateServer(pingResult) {
     throw new Error(
       `Port ${PORT} is owned by user "${pingResult.user}" (expected "${EXPECTED_USER}"). ` +
       `Fix: set VECTOR_MEMORY_PORT to a unique port in ~/.copilot/mcp-config.json — ` +
-      `see https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP#multi-user-setup`
+      `see https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP#port-owned-by-another-user`
     );
   }
 
@@ -115,7 +115,7 @@ async function ensureServer() {
   throw new Error(
     `Vector memory server failed to start — port ${PORT} may be in use by another service. ` +
     `Fix: set VECTOR_MEMORY_PORT to an unused port in ~/.copilot/mcp-config.json — ` +
-    `see https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP#environment-variables`
+    `see https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP#port-occupied-by-another-service`
   );
 }
 
