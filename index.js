@@ -44,7 +44,8 @@ function validateServer(pingResult) {
   if (pingResult.user && pingResult.user !== EXPECTED_USER) {
     throw new Error(
       `Port ${PORT} is owned by user "${pingResult.user}" (expected "${EXPECTED_USER}"). ` +
-      `Set VECTOR_MEMORY_PORT to a different port in your mcp-config.json.`
+      `Fix: set VECTOR_MEMORY_PORT to a unique port in ~/.copilot/mcp-config.json — ` +
+      `see https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP#multi-user-setup`
     );
   }
 
