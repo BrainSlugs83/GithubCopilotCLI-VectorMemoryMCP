@@ -11,11 +11,13 @@ import { userInfo } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const COPILOT_DIR = join(homedir(), ".copilot");
-const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || "31337", 10);
+const EXPECTED_USER = userInfo().username;
+const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
+
+import { userPort } from "./lib.js";
+const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || String(userPort(EXPECTED_USER)), 10);
 const SERVER_URL = `http://127.0.0.1:${PORT}`;
 const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
-const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
-const EXPECTED_USER = userInfo().username;
 
 // --- Check if server is running ---
 

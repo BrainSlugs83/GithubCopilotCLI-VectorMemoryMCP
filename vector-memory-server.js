@@ -8,7 +8,7 @@ import { fileURLToPath } from "url";
 import { createServer, request as httpReq } from "http";
 import { execSync } from "child_process";
 import { userInfo } from "os";
-import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, DIMS, createHandler } from "./lib.js";
+import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, DIMS, createHandler, userPort } from "./lib.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
@@ -171,7 +171,7 @@ async function search(vecDb, query, limit = 10) {
 
 // --- HTTP Server (singleton, port 31337) ---
 
-const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || "31337", 10);
+const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || String(userPort(SERVER_USER)), 10);
 
 const handleRequest = createHandler({
   openVectorDb,

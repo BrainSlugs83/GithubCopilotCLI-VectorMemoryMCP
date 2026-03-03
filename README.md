@@ -15,7 +15,7 @@ copilot.exe ──STDIO──▶ index.js (proxy) ──HTTP──▶ vector-mem
 ```
 
 - **index.js** — Thin STDIO MCP proxy. One per copilot instance. Checks if the HTTP server is running, launches it if not, then ferries tool calls over HTTP.
-- **vector-memory-server.js** — Singleton HTTP server on `localhost:31337`. Owns the embedding model (one copy in memory), SQLite vector DB, and background indexing.
+- **vector-memory-server.js** — Singleton HTTP server. Owns the embedding model (one copy in memory), SQLite vector DB, and background indexing. Port is auto-assigned per user via a deterministic hash of the username.
 - **embed-worker.js** — Worker thread that loads the ONNX model and handles embedding inference off the main thread.
 - **lib.js** — Pure logic extracted for testability: filtering, dedup, post-processing, process detection.
 
@@ -67,10 +67,10 @@ Add to `~/.copilot/mcp-config.json`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `VECTOR_MEMORY_PORT` | `31337` | HTTP port for the singleton server. Change this to run independent instances per user. |
+| `VECTOR_MEMORY_PORT` | *(auto)* | HTTP port for the singleton server. By default, a deterministic port is computed from your OS username (FNV-1a hash, range 31337–35432). Only set this if two users happen to collide. |
 | `VECTOR_MEMORY_IDLE_TIMEOUT` | `5` | Minutes of inactivity before the server shuts down. `0` or negative = never shut down. |
 
-Set these in the `env` block of `mcp-config.json`:
+Set these in the `env` block of `mcp-config.json` (only if needed):
 
 ```json
 {
@@ -79,7 +79,6 @@ Set these in the `env` block of `mcp-config.json`:
       "command": "node",
       "args": ["C:/Users/<you>/.copilot/mcp-servers/vector-memory/index.js"],
       "env": {
-        "VECTOR_MEMORY_PORT": "31338",
         "VECTOR_MEMORY_IDLE_TIMEOUT": "10"
       }
     }
@@ -87,11 +86,17 @@ Set these in the `env` block of `mcp-config.json`:
 }
 ```
 
+#### Auto-port assignment
+
+Each user automatically gets a deterministic port based on their OS username (FNV-1a hash with rotation, range 31337–35432). This means multi-user setups work **zero-config** — no manual port assignment needed.
+
+In the rare case of a hash collision (two usernames mapping to the same port), the server detects the conflict at startup and tells the affected user to set `VECTOR_MEMORY_PORT` manually.
+
 #### Multi-user setup
 
-On a shared machine, each user needs their own port to keep session history isolated (the vector index lives in each user's `~/.copilot/`). Point both configs at the same codebase:
+On a shared machine, each user's server runs on their auto-assigned port. Just point both configs at the same codebase — no `env` block needed:
 
-**User A** (`~/.copilot/mcp-config.json`) — uses default port 31337:
+**User A** (`~/.copilot/mcp-config.json`):
 ```json
 {
   "mcpServers": {
@@ -103,16 +108,13 @@ On a shared machine, each user needs their own port to keep session history isol
 }
 ```
 
-**User B** (`~/.copilot/mcp-config.json`) — uses port 31338:
+**User B** (`~/.copilot/mcp-config.json`) — same config, different port automatically:
 ```json
 {
   "mcpServers": {
     "vector-memory": {
       "command": "node",
-      "args": ["D:/shared/vector-memory/index.js"],
-      "env": {
-        "VECTOR_MEMORY_PORT": "31338"
-      }
+      "args": ["D:/shared/vector-memory/index.js"]
     }
   }
 }
@@ -161,11 +163,11 @@ node --test --experimental-test-coverage test.js
 # Start server directly (normally done by the proxy)
 node vector-memory-server.js
 
-# Check if running
-curl -X POST http://127.0.0.1:31337/ping -d "{}"
+# Check if running (port varies per user — see startup log)
+curl -X POST http://127.0.0.1:<PORT>/ping -d "{}"
 
 # Search directly
-curl -X POST http://127.0.0.1:31337/search \
+curl -X POST http://127.0.0.1:<PORT>/search \
   -H "Content-Type: application/json" \
   -d '{"query":"what did I work on yesterday","limit":5}'
 
@@ -186,11 +188,11 @@ cat ~/.copilot/vector-memory.pid
 
 ## Troubleshooting
 
-### Port owned by another user
+### Port collision with another user
 
-**Error:** `Port 31337 is owned by user "X" (expected "Y")`
+**Error:** `Port 31796 is owned by user "X" (expected "Y")`
 
-Two users on the same machine are pointing at the same port. Each user needs a unique port. Edit `~/.copilot/mcp-config.json` and add a `VECTOR_MEMORY_PORT` env var:
+Two usernames hashed to the same port (rare — FNV-1a produces very few collisions). One user needs to set a manual override. Edit `~/.copilot/mcp-config.json` and add a `VECTOR_MEMORY_PORT` env var:
 
 ```json
 {
@@ -210,9 +212,9 @@ See [Multi-user setup](#multi-user-setup) for full details.
 
 ### Port occupied by another service
 
-**Error:** `Vector memory server failed to start — port 31337 may be in use by another service`
+**Error:** `Vector memory server failed to start — port XXXXX may be in use by another service`
 
-Something else is listening on the default port. Pick a different port using the same `VECTOR_MEMORY_PORT` env var as above.
+Something else is listening on your auto-assigned port. Pick a different port using the `VECTOR_MEMORY_PORT` env var as above.
 
 To check what's on the port:
 ```bash

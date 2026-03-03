@@ -3,6 +3,21 @@
 export const DIMS = 384;
 export const MIN_SCORE = 0.25;
 export const JITTER = 0.05;
+export const BASE_PORT = 31337;
+
+/** FNV-1a hash with ROR by length, truncated to 12 bits. Deterministic port per username. */
+export function userPort(username) {
+  const str = username.toLowerCase();
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  h = h >>> 0;
+  const rot = str.length % 32;
+  h = ((h >>> rot) | (h << (32 - rot))) >>> 0;
+  return BASE_PORT + (h & 0xFFF);
+}
 
 /** Filter out already-indexed items by comparing composite keys */
 export function filterUnindexed(allContent, existingIndex) {
