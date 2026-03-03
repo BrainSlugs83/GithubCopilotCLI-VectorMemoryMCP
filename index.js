@@ -42,10 +42,10 @@ function validateServer(pingResult) {
   if (!pingResult || !pingResult.ok) return null;
 
   if (pingResult.user && pingResult.user !== EXPECTED_USER) {
-    throw new Error(
-      `Port ${PORT} is owned by user "${pingResult.user}" (expected "${EXPECTED_USER}"). ` +
-      `Set VECTOR_MEMORY_PORT to a different port in your mcp-config.json.`
-    );
+    const msg = `[vector-memory] FATAL: Port ${PORT} is owned by user "${pingResult.user}" (expected "${EXPECTED_USER}"). ` +
+      `Set VECTOR_MEMORY_PORT to a different port in your mcp-config.json.\n`;
+    process.stderr.write(msg);
+    process.exit(1);
   }
 
   if (pingResult.version && pingResult.version !== PKG.version) {
