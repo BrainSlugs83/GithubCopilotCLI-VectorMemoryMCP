@@ -112,7 +112,11 @@ async function ensureServer() {
       return;
     }
   }
-  throw new Error("Vector memory server failed to start within 30s");
+  throw new Error(
+    `Vector memory server failed to start — port ${PORT} may be in use by another service. ` +
+    `Fix: set VECTOR_MEMORY_PORT to an unused port in ~/.copilot/mcp-config.json — ` +
+    `see https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP#environment-variables`
+  );
 }
 
 // --- HTTP client helper ---
