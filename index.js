@@ -7,12 +7,15 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { request } from "http";
+import { userInfo } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const COPILOT_DIR = join(homedir(), ".copilot");
 const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || "31337", 10);
 const SERVER_URL = `http://127.0.0.1:${PORT}`;
 const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
+const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
+const EXPECTED_USER = userInfo().username;
 
 // --- Check if server is running ---
 
@@ -23,17 +26,35 @@ function ping() {
       res.on("data", (c) => chunks.push(c));
       res.on("end", () => {
         try {
-          const body = JSON.parse(Buffer.concat(chunks).toString());
-          resolve(body.ok === true);
+          resolve(JSON.parse(Buffer.concat(chunks).toString()));
         } catch {
-          resolve(false);
+          resolve(null);
         }
       });
     });
-    req.on("error", () => resolve(false));
-    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
     req.end(JSON.stringify({}));
   });
+}
+
+function validateServer(pingResult) {
+  if (!pingResult || !pingResult.ok) return null;
+
+  if (pingResult.user && pingResult.user !== EXPECTED_USER) {
+    throw new Error(
+      `Port ${PORT} is owned by user "${pingResult.user}" (expected "${EXPECTED_USER}"). ` +
+      `Set VECTOR_MEMORY_PORT to a different port in your mcp-config.json.`
+    );
+  }
+
+  if (pingResult.version && pingResult.version !== PKG.version) {
+    process.stderr.write(
+      `[vector-memory] Warning: server version ${pingResult.version} ≠ proxy version ${PKG.version}. Consider restarting.\n`
+    );
+  }
+
+  return true;
 }
 
 function isProcessAlive(pid) {
@@ -47,7 +68,11 @@ function isProcessAlive(pid) {
 
 async function ensureServer() {
   // Check if already running
-  if (await ping()) return;
+  const existing = await ping();
+  if (existing) {
+    validateServer(existing);
+    return;
+  }
 
   // Check stale pidfile
   if (existsSync(PID_FILE)) {
@@ -58,7 +83,11 @@ async function ensureServer() {
       // Process exists but not responding to ping yet — wait a bit
       for (let i = 0; i < 10; i++) {
         await new Promise((r) => setTimeout(r, 1000));
-        if (await ping()) return;
+        const result = await ping();
+        if (result) {
+          validateServer(result);
+          return;
+        }
       }
     }
   }
@@ -76,7 +105,11 @@ async function ensureServer() {
   // Wait for it to be ready
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 1000));
-    if (await ping()) return;
+    const result = await ping();
+    if (result) {
+      validateServer(result);
+      return;
+    }
   }
   throw new Error("Vector memory server failed to start within 30s");
 }

@@ -125,7 +125,8 @@ export function createHandler(deps) {
           }
         }
       } else if (req.url === "/ping") {
-        result = { ok: true };
+        const identity = deps.getIdentity ? deps.getIdentity() : {};
+        result = { ok: true, ...identity };
       } else {
         res.writeHead(404);
         res.end();

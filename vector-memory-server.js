@@ -3,13 +3,16 @@ import * as sqliteVec from "sqlite-vec";
 import { Worker } from "worker_threads";
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { existsSync, writeFileSync, unlinkSync } from "fs";
+import { existsSync, writeFileSync, unlinkSync, readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { createServer, request as httpReq } from "http";
 import { execSync } from "child_process";
+import { userInfo } from "os";
 import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, DIMS, createHandler } from "./lib.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
+const SERVER_USER = userInfo().username;
 const COPILOT_DIR = join(homedir(), ".copilot");
 const SESSION_STORE_PATH = join(COPILOT_DIR, "session-store.db");
 const VECTOR_INDEX_PATH = join(COPILOT_DIR, "vector-index.db");
@@ -179,6 +182,7 @@ const handleRequest = createHandler({
   runMaintenance,
   getIsIndexing: () => isIndexing,
   setIsIndexing: (v) => { isIndexing = v; },
+  getIdentity: () => ({ user: SERVER_USER, version: PKG.version }),
 });
 
 let lastActivity = Date.now();
