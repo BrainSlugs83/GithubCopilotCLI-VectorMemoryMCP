@@ -42,10 +42,10 @@ function validateServer(pingResult) {
   if (!pingResult || !pingResult.ok) return null;
 
   if (pingResult.user && pingResult.user !== EXPECTED_USER) {
-    const msg = `[vector-memory] FATAL: Port ${PORT} is owned by user "${pingResult.user}" (expected "${EXPECTED_USER}"). ` +
-      `Set VECTOR_MEMORY_PORT to a different port in your mcp-config.json.\n`;
-    process.stderr.write(msg);
-    process.exit(1);
+    throw new Error(
+      `Port ${PORT} is owned by user "${pingResult.user}" (expected "${EXPECTED_USER}"). ` +
+      `Set VECTOR_MEMORY_PORT to a different port in your mcp-config.json.`
+    );
   }
 
   if (pingResult.version && pingResult.version !== PKG.version) {
@@ -142,11 +142,16 @@ function callServer(path, body) {
 
 // --- Start: ensure server, then expose MCP tools ---
 
-await ensureServer();
+let startupError = null;
+try {
+  await ensureServer();
+} catch (err) {
+  startupError = err.message;
+}
 
 const server = new McpServer({
   name: "vector-memory",
-  version: "1.0.0",
+  version: PKG.version,
 });
 
 server.tool(
@@ -164,6 +169,9 @@ server.tool(
       .describe("Max results to return (default 10)"),
   },
   async ({ query, limit }) => {
+    if (startupError) {
+      return { content: [{ type: "text", text: `⚠ vector-memory misconfigured: ${startupError}` }] };
+    }
     try {
       const results = await callServer("/search", { query, limit });
 
@@ -194,6 +202,9 @@ server.tool(
     "vector_search auto-indexes new content. Use this if the index seems stale or corrupted.",
   {},
   async () => {
+    if (startupError) {
+      return { content: [{ type: "text", text: `⚠ vector-memory misconfigured: ${startupError}` }] };
+    }
     try {
       const result = await callServer("/reindex", {});
       if (result.error) {
