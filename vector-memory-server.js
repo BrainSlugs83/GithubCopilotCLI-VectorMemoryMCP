@@ -28,11 +28,18 @@ function initWorker() {
   worker = new Worker(join(__dirname, "embed-worker.js"));
   worker.on("message", (msg) => {
     if (msg.type === "ready") return;
+    if (msg.type === "error") {
+      process.stderr.write(`[vector-memory] Embedding model error: ${msg.message}\n`);
+      return;
+    }
     const resolve = pendingEmbeds.get(msg.id);
     if (resolve) {
       pendingEmbeds.delete(msg.id);
       resolve(msg.embedding);
     }
+  });
+  worker.on("error", (err) => {
+    process.stderr.write(`[vector-memory] Worker crashed: ${err.message}\n`);
   });
 }
 

@@ -12,7 +12,8 @@
   "scripts": {
     "lint": "eslint index.js vector-memory-server.js embed-worker.js lib.js",
     "test": "node --test test.js",
-    "check": "npm run lint && npm run test"
+    "check": "npm run lint && npm run test",
+    "postinstall": "node --input-type=module -e \"import('@huggingface/transformers').then(m=>m.pipeline('feature-extraction','Xenova/gte-small',{dtype:'q8'})).then(()=>console.log('✓ Embedding model ready')).catch(e=>console.error('⚠ Model download failed (will retry on first run):',e.message))\""
   },
   "dependencies": {
     "@huggingface/transformers": "^3.0.0",
