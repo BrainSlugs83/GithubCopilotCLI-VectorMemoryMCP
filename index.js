@@ -78,13 +78,11 @@ async function ensureServer() {
     return;
   }
 
-  // Check stale pidfile
+  // Check stale pidfile — if process is alive but not responding, give it a moment
   if (existsSync(PID_FILE)) {
     const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim());
-    if (!isNaN(pid) && !isProcessAlive(pid)) {
-      // Stale pid, server is dead
-    } else if (!isNaN(pid) && isProcessAlive(pid)) {
-      // Process exists but not responding to ping yet — wait a bit
+    if (!isNaN(pid) && isProcessAlive(pid)) {
+      // Process exists but not responding — it may still be starting up
       for (let i = 0; i < 10; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         const result = await ping();
@@ -93,6 +91,7 @@ async function ensureServer() {
           return;
         }
       }
+      // Still alive but not responding — fall through to launch a new one
     }
   }
 
@@ -105,21 +104,21 @@ async function ensureServer() {
     env: { ...process.env, VECTOR_MEMORY_PORT: String(PORT) },
   });
   child.unref();
+}
 
-  // Wait for it to be ready
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
+// Wait for the server to become responsive, with a configurable timeout.
+// Returns true if ready, false if timed out.
+async function waitForServer(maxWaitMs = 300_000) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
     const result = await ping();
     if (result) {
       validateServer(result);
-      return;
+      return true;
     }
+    await new Promise((r) => setTimeout(r, 1000));
   }
-  throw new Error(
-    `Vector memory server failed to start — port ${PORT} may be in use by another service. ` +
-    `Fix: set VECTOR_MEMORY_PORT to an unused port in ~/.copilot/mcp-config.json — ` +
-    `see https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP#port-occupied-by-another-service`
-  );
+  return false;
 }
 
 // --- HTTP client helper ---
@@ -148,14 +147,23 @@ function callServer(path, body) {
   });
 }
 
-// Auto-relaunch wrapper: retries once after ensureServer on connection failure
+// Auto-relaunch wrapper: if the server isn't reachable, launch it and wait patiently.
+// On first run the model download can take several minutes — we wait up to 5 min.
+const WARMUP_MSG =
+  "⏳ Vector memory server is still starting up (first launch downloads a ~34 MB ML model " +
+  "and compiles native modules — this is a one-time cost). Try again in a minute or two.";
+
 async function callServerWithRetry(path, body) {
   try {
     return await callServer(path, body);
   } catch (err) {
     if (err.message && (err.message.includes("ECONNREFUSED") || err.message.includes("ECONNRESET"))) {
-      startupError = null;
+      // Server isn't responding — (re)launch and wait for it
       await ensureServer();
+      const ready = await waitForServer(300_000); // 5 minutes for first-run model download
+      if (!ready) {
+        return { error: WARMUP_MSG };
+      }
       return await callServer(path, body);
     }
     throw err;
@@ -168,27 +176,51 @@ const keepaliveTimer = setInterval(async () => {
   try {
     const result = await ping();
     if (!result) {
-      // Server died — relaunch it
-      startupError = null;
+      // Server died — relaunch it (non-blocking)
       await ensureServer();
     }
   } catch {}
 }, KEEPALIVE_MS);
 keepaliveTimer.unref(); // Don't block process exit for keepalive
 
-// --- Start: ensure server, then expose MCP tools ---
+// --- Start: launch server in background, connect MCP transport immediately ---
+// Don't block here — the server may need minutes on first run to download the ML model.
+// Tools will wait for the server when called.
+ensureServer().catch(() => {});  // fire-and-forget; tools handle readiness
 
-let startupError = null;
-try {
-  await ensureServer();
-} catch (err) {
-  startupError = err.message;
-}
-
-const server = new McpServer({
-  name: "vector-memory",
-  version: PKG.version,
-});
+const server = new McpServer(
+  {
+    name: "vector-memory",
+    version: PKG.version,
+  },
+  {
+    instructions: [
+      "## Vector Memory — Usage Guide",
+      "",
+      "You have a `vector_search` tool that provides **semantic search across all past session history.**",
+      "Use it proactively and aggressively — don't wait to be asked.",
+      "",
+      "### When to search (default to searching — it's local, free, and instant):",
+      "- Any topic where prior sessions might have context (a project, tool, concept, problem)",
+      "- User mentions something that implies shared history: \"remember when...\", \"didn't we...\", \"have we ever...\"",
+      "- User annotates a word with `(r)` or `(recall)` — e.g. \"my RTX 3090(r) machine\" — treat it like a hyperlink to memory",
+      "- Beginning of a new session — search for recent context on the current repo/directory",
+      "- Before making assumptions about prior decisions or conventions — check memory first",
+      "- When the user starts a task similar to something done before",
+      "",
+      "### How it works:",
+      "- It's **semantic** search — query by concept, not just keywords. \"How did we handle auth\" finds results even if \"auth\" was never literally used.",
+      "- It's stochastic — results vary slightly each call. If a search doesn't surface what you need, rephrase and try again.",
+      "- Better to search and find nothing than to miss context that existed.",
+      "- Use `vector_reindex` only if results seem stale — auto-indexing handles most cases.",
+      "",
+      "### Architecture (for troubleshooting):",
+      "- Singleton HTTP server (one ONNX model in memory shared across all copilot instances)",
+      "- Thin STDIO proxy per copilot instance auto-launches the server if needed",
+      "- Server idles down after 5 min of inactivity; proxy restarts it on next use",
+    ].join("\n"),
+  },
+);
 
 server.tool(
   "vector_search",
@@ -205,9 +237,6 @@ server.tool(
       .describe("Max results to return (default 10)"),
   },
   async ({ query, limit }) => {
-    if (startupError) {
-      return { content: [{ type: "text", text: `⚠ vector-memory misconfigured: ${startupError}` }] };
-    }
     try {
       const results = await callServerWithRetry("/search", { query, limit });
 
@@ -238,9 +267,6 @@ server.tool(
     "vector_search auto-indexes new content. Use this if the index seems stale or corrupted.",
   {},
   async () => {
-    if (startupError) {
-      return { content: [{ type: "text", text: `⚠ vector-memory misconfigured: ${startupError}` }] };
-    }
     try {
       const result = await callServerWithRetry("/reindex", {});
       if (result.error) {
