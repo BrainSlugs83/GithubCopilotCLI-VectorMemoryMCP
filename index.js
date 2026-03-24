@@ -163,7 +163,7 @@ async function callServerWithRetry(path, body) {
 
 // --- Keepalive: ping server every 2 minutes to prevent idle shutdown ---
 const KEEPALIVE_MS = 2 * 60_000;
-setInterval(async () => {
+const keepaliveTimer = setInterval(async () => {
   try {
     const result = await ping();
     if (!result) {
@@ -173,6 +173,7 @@ setInterval(async () => {
     }
   } catch {}
 }, KEEPALIVE_MS);
+keepaliveTimer.unref(); // Don't block process exit for keepalive
 
 // --- Start: ensure server, then expose MCP tools ---
 
