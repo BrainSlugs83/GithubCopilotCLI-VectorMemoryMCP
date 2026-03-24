@@ -1,6 +1,6 @@
 {
   "name": "ghcp-cli-vector-memory-mcp",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "MCP server that gives GitHub Copilot CLI persistent long-term memory via local semantic vector search. Install: npx -y ghcp-cli-vector-memory-mcp",
   "main": "index.js",
   "bin": {

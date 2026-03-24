@@ -282,36 +282,50 @@ keepaliveTimer.unref(); // Don't block process exit for keepalive
 // Tools will wait for the server when called.
 ensureServer().catch(() => {});  // fire-and-forget; tools handle readiness
 
+const warmStart = serverDepsInstalled();
+
+const instructionLines = [
+  "## Vector Memory — Usage Guide",
+  "",
+  "You have a `vector_search` tool that provides **semantic search across all past session history.**",
+  "Use it proactively and aggressively — don't wait to be asked.",
+  "",
+  "### When to search (default to searching — it's local, free, and instant):",
+  "- Any topic where prior sessions might have context (a project, tool, concept, problem)",
+  "- User mentions something that implies shared history: \"remember when...\", \"didn't we...\", \"have we ever...\"",
+  "- User annotates a word with `(r)` or `(recall)` — e.g. \"my RTX 3090(r) machine\" — treat it like a hyperlink to memory",
+  "- Beginning of a new session — search for recent context on the current repo/directory",
+  "- Before making assumptions about prior decisions or conventions — check memory first",
+  "- When the user starts a task similar to something done before",
+  "",
+  "### How it works:",
+  "- It's **semantic** search — query by concept, not just keywords. \"How did we handle auth\" finds results even if \"auth\" was never literally used.",
+  "- It's stochastic — results vary slightly each call. If a search doesn't surface what you need, rephrase and try again.",
+  "- Better to search and find nothing than to miss context that existed.",
+  "- Use `vector_reindex` only if results seem stale — auto-indexing handles most cases.",
+  "",
+  "### Architecture (for troubleshooting):",
+  "- Singleton HTTP server (per-user-alias port, one ONNX model in memory shared across all copilot instances)",
+  "- Thin STDIO proxy per copilot instance auto-launches the server if needed",
+];
+
+if (warmStart) {
+  instructionLines.push(
+    "",
+    "### Bottom line:",
+    "**Search early, search often.** You have virtually unlimited long-term memory at zero cost.",
+    "If there's even a chance a prior session touched on the current topic, search before responding.",
+    "The user expects you to leverage this — not searching when you should is a missed opportunity.",
+  );
+}
+
 const server = new McpServer(
   {
     name: "vector-memory",
     version: PKG.version,
   },
   {
-    instructions: [
-      "## Vector Memory — Usage Guide",
-      "",
-      "You have a `vector_search` tool that provides **semantic search across all past session history.**",
-      "Use it proactively and aggressively — don't wait to be asked.",
-      "",
-      "### When to search (default to searching — it's local, free, and instant):",
-      "- Any topic where prior sessions might have context (a project, tool, concept, problem)",
-      "- User mentions something that implies shared history: \"remember when...\", \"didn't we...\", \"have we ever...\"",
-      "- User annotates a word with `(r)` or `(recall)` — e.g. \"my RTX 3090(r) machine\" — treat it like a hyperlink to memory",
-      "- Beginning of a new session — search for recent context on the current repo/directory",
-      "- Before making assumptions about prior decisions or conventions — check memory first",
-      "- When the user starts a task similar to something done before",
-      "",
-      "### How it works:",
-      "- It's **semantic** search — query by concept, not just keywords. \"How did we handle auth\" finds results even if \"auth\" was never literally used.",
-      "- It's stochastic — results vary slightly each call. If a search doesn't surface what you need, rephrase and try again.",
-      "- Better to search and find nothing than to miss context that existed.",
-      "- Use `vector_reindex` only if results seem stale — auto-indexing handles most cases.",
-      "",
-      "### Architecture (for troubleshooting):",
-      "- Singleton HTTP server (one ONNX model in memory shared across all copilot instances)",
-      "- Thin STDIO proxy per copilot instance auto-launches the server if needed",
-    ].join("\n"),
+    instructions: instructionLines.join("\n"),
   },
 );
 

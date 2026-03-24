@@ -207,7 +207,7 @@ async function search(vecDb, query, limit = 10) {
 
 // --- Startup (heavy init deferred until after singleton check) ---
 
-// --- HTTP Server (singleton, port 31337) ---
+// --- HTTP Server (singleton, per-user-alias port via userPort()) ---
 
 const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || String(userPort(SERVER_USER)), 10);
 
