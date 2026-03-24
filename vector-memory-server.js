@@ -26,35 +26,73 @@ let isIndexing = false;
 
 // --- Embedding via Worker Thread ---
 
-// Worker is started lazily after we win the singleton race
+// Worker is started lazily after we win the singleton race.
+// Auto-restarts on crash to prevent zombie server state.
 let worker;
+let workerAlive = false;
 let embedIdCounter = 0;
-const pendingEmbeds = new Map();
+const pendingEmbeds = new Map(); // id → { resolve, reject }
+const EMBED_TIMEOUT_MS = 60_000;
+
+function rejectAllPending(reason) {
+  for (const [id, { reject }] of pendingEmbeds) {
+    reject(new Error(reason));
+  }
+  pendingEmbeds.clear();
+}
 
 function initWorker() {
   worker = new Worker(join(__dirname, "embed-worker.js"));
+  workerAlive = true;
+
   worker.on("message", (msg) => {
     if (msg.type === "ready") return;
     if (msg.type === "error") {
       process.stderr.write(`[vector-memory] Embedding model error: ${msg.message}\n`);
       return;
     }
-    const resolve = pendingEmbeds.get(msg.id);
-    if (resolve) {
+    const pending = pendingEmbeds.get(msg.id);
+    if (pending) {
+      clearTimeout(pending.timer);
       pendingEmbeds.delete(msg.id);
-      resolve(msg.embedding);
+      pending.resolve(msg.embedding);
     }
   });
+
   worker.on("error", (err) => {
     process.stderr.write(`[vector-memory] Worker crashed: ${err.message}\n`);
+    workerAlive = false;
+    rejectAllPending("Worker crashed: " + err.message);
+  });
+
+  worker.on("exit", (code) => {
+    workerAlive = false;
+    if (code !== 0) {
+      process.stderr.write(`[vector-memory] Worker exited with code ${code} — restarting in 2s\n`);
+      rejectAllPending("Worker exited with code " + code);
+      setTimeout(() => initWorker(), 2000);
+    }
   });
 }
 
 function embed(text) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    if (!workerAlive) {
+      return reject(new Error("Embed worker is not running"));
+    }
     const id = embedIdCounter++;
-    pendingEmbeds.set(id, resolve);
-    worker.postMessage({ id, text });
+    const timer = setTimeout(() => {
+      pendingEmbeds.delete(id);
+      reject(new Error("Embedding timed out after " + EMBED_TIMEOUT_MS + "ms"));
+    }, EMBED_TIMEOUT_MS);
+    pendingEmbeds.set(id, { resolve, reject, timer });
+    try {
+      worker.postMessage({ id, text });
+    } catch (err) {
+      clearTimeout(timer);
+      pendingEmbeds.delete(id);
+      reject(err);
+    }
   });
 }
 

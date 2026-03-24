@@ -250,8 +250,9 @@ async function callServerWithRetry(path, body) {
   try {
     return await callServer(path, body);
   } catch (err) {
-    if (err.message && (err.message.includes("ECONNREFUSED") || err.message.includes("ECONNRESET"))) {
-      // Server isn't responding — (re)launch and wait for it
+    const msg = err.message || "";
+    if (msg.includes("ECONNREFUSED") || msg.includes("ECONNRESET") || msg.includes("timeout")) {
+      // Server isn't responding or timed out — (re)launch and wait for it
       await ensureServer();
       const ready = await waitForServer(300_000); // 5 minutes for first-run model download
       if (!ready) {
