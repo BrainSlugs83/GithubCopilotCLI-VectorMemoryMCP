@@ -6,7 +6,7 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, copyFileSync } from "fs";
 import { request } from "http";
 import { userInfo } from "os";
 
@@ -19,6 +19,94 @@ import { userPort } from "./lib.js";
 const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || String(userPort(EXPECTED_USER)), 10);
 const SERVER_URL = `http://127.0.0.1:${PORT}`;
 const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
+
+// --- Server dependency management ---
+// In npx mode, server-only deps (onnxruntime, better-sqlite3, etc.) are NOT in
+// node_modules — they'd bloat the install by 400+ MB and block the MCP handshake.
+// We install them to __dirname/.server/ on first use instead.
+
+const SERVER_DEPS_DIR = join(__dirname, ".server");
+const SERVER_DEPS_JSON = join(__dirname, "server-deps.json");
+const SERVER_FILES = ["vector-memory-server.js", "embed-worker.js", "lib.js"];
+
+/** Check if server deps are available (either in node_modules or .server/) */
+function serverDepsInstalled() {
+  if (existsSync(join(__dirname, "node_modules", "better-sqlite3"))) return true;
+  try {
+    return readFileSync(join(SERVER_DEPS_DIR, ".version"), "utf-8").trim() === PKG.version;
+  } catch { return false; }
+}
+
+/** Return the directory the server should run from */
+function getServerDir() {
+  if (existsSync(join(__dirname, "node_modules", "better-sqlite3"))) return __dirname;
+  return SERVER_DEPS_DIR;
+}
+
+let _installPromise = null;
+
+/** Install server deps to .server/ (singleton — only one install runs at a time) */
+function installServerDeps() {
+  if (_installPromise) return _installPromise;
+
+  _installPromise = new Promise((resolve) => {
+    try {
+      mkdirSync(SERVER_DEPS_DIR, { recursive: true });
+
+      const deps = JSON.parse(readFileSync(SERVER_DEPS_JSON, "utf-8"));
+      const pkg = {
+        name: "vector-memory-server-deps",
+        private: true,
+        type: "module",
+        version: PKG.version,
+        dependencies: deps,
+      };
+      writeFileSync(join(SERVER_DEPS_DIR, "package.json"), JSON.stringify(pkg, null, 2));
+
+      for (const file of SERVER_FILES) {
+        copyFileSync(join(__dirname, file), join(SERVER_DEPS_DIR, file));
+      }
+
+      process.stderr.write("[vector-memory] Installing server dependencies (one-time setup)...\n");
+      const child = spawn("npm", ["install", "--production", "--no-audit", "--no-fund"], {
+        cwd: SERVER_DEPS_DIR,
+        stdio: "pipe",
+        shell: true,
+        windowsHide: true,
+      });
+
+      child.on("close", (code) => {
+        if (code === 0) {
+          writeFileSync(join(SERVER_DEPS_DIR, ".version"), PKG.version);
+          process.stderr.write("[vector-memory] Server dependencies installed.\n");
+        } else {
+          process.stderr.write(`[vector-memory] npm install failed (exit ${code}). Will retry.\n`);
+        }
+        _installPromise = null;
+        resolve(code === 0);
+      });
+
+      child.on("error", (err) => {
+        process.stderr.write(`[vector-memory] npm install error: ${err.message}\n`);
+        _installPromise = null;
+        resolve(false);
+      });
+    } catch (err) {
+      process.stderr.write(`[vector-memory] Setup error: ${err.message}\n`);
+      _installPromise = null;
+      resolve(false);
+    }
+  });
+
+  return _installPromise;
+}
+
+/** Ensure server deps are available; installs them if missing or outdated */
+async function ensureServerDeps() {
+  if (serverDepsInstalled()) return true;
+  if (!existsSync(SERVER_DEPS_JSON)) return true; // dev mode — deps in node_modules
+  return await installServerDeps();
+}
 
 // --- Check if server is running ---
 
@@ -95,8 +183,13 @@ async function ensureServer() {
     }
   }
 
-  // Launch server detached
-  const serverPath = join(__dirname, "vector-memory-server.js");
+  // Ensure server deps are installed (no-op in dev mode; installs in npx mode)
+  const depsReady = await ensureServerDeps();
+  if (!depsReady) return; // logged in ensureServerDeps; will retry on next call
+
+  // Launch server detached from the correct directory
+  const serverDir = getServerDir();
+  const serverPath = join(serverDir, "vector-memory-server.js");
   const child = spawn(process.execPath, [serverPath], {
     detached: true,
     stdio: "ignore",
@@ -150,8 +243,8 @@ function callServer(path, body) {
 // Auto-relaunch wrapper: if the server isn't reachable, launch it and wait patiently.
 // On first run the model download can take several minutes — we wait up to 5 min.
 const WARMUP_MSG =
-  "⏳ Vector memory server is still starting up (first launch downloads a ~34 MB ML model " +
-  "and compiles native modules — this is a one-time cost). Try again in a minute or two.";
+  "⏳ Vector memory server is still starting up (first launch installs server dependencies " +
+  "and downloads a ~34 MB ML model — this is a one-time cost). Try again in a minute or two.";
 
 async function callServerWithRetry(path, body) {
   try {
@@ -217,7 +310,6 @@ const server = new McpServer(
       "### Architecture (for troubleshooting):",
       "- Singleton HTTP server (one ONNX model in memory shared across all copilot instances)",
       "- Thin STDIO proxy per copilot instance auto-launches the server if needed",
-      "- Server idles down after 5 min of inactivity; proxy restarts it on next use",
     ].join("\n"),
   },
 );

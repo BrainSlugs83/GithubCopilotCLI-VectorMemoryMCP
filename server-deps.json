@@ -1,0 +1,5 @@
+{
+  "@huggingface/transformers": "^3.0.0",
+  "better-sqlite3": "^12.1.0",
+  "sqlite-vec": "^0.1.0"
+}
