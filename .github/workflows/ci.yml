@@ -18,4 +18,10 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - run: npm ci
-      - run: npm run check
+      # Node 22+ supports coverage thresholds; Node 20 runs tests only
+      - name: Lint + test with 100% coverage
+        if: matrix.node-version >= 22
+        run: npm run check
+      - name: Lint + test (no coverage enforcement)
+        if: matrix.node-version < 22
+        run: npm run lint && npm test
