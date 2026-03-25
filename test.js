@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, MIN_SCORE, createHandler } from "./lib.js";
+import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, userPort, BASE_PORT, MIN_SCORE, createHandler } from "./lib.js";
 
 // --- Mock helpers for handler tests ---
 
@@ -49,6 +49,27 @@ function makeDeps(overrides = {}) {
     ...overrides,
   };
 }
+
+describe("userPort", () => {
+  it("returns a number within the expected range", () => {
+    const port = userPort("testuser");
+    assert.ok(port >= BASE_PORT, `port ${port} should be >= ${BASE_PORT}`);
+    assert.ok(port <= BASE_PORT + 0xFFF, `port ${port} should be <= ${BASE_PORT + 0xFFF}`);
+  });
+
+  it("is deterministic for the same username", () => {
+    assert.equal(userPort("alice"), userPort("alice"));
+  });
+
+  it("is case-insensitive", () => {
+    assert.equal(userPort("Alice"), userPort("alice"));
+  });
+
+  it("returns different ports for different usernames", () => {
+    // Not guaranteed for all pairs, but statistically overwhelmingly likely
+    assert.notEqual(userPort("alice"), userPort("bob"));
+  });
+});
 
 describe("filterUnindexed", () => {
   it("returns items not in the existing index", () => {
@@ -251,6 +272,19 @@ describe("handleRequest - /ping", () => {
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.body, { ok: true });
   });
+
+  it("includes identity when getIdentity is provided", async () => {
+    const deps = makeDeps({
+      getIdentity: () => ({ user: "testuser", version: "1.0.0" }),
+    });
+    const handler = createHandler(deps);
+    const res = mockRes();
+    await handler(mockReq("POST", "/ping"), res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.user, "testuser");
+    assert.equal(res.body.version, "1.0.0");
+  });
 });
 
 describe("handleRequest - routing", () => {
@@ -342,6 +376,19 @@ describe("handleRequest - /search", () => {
     const handler = createHandler(deps);
     await handler(mockReq("POST", "/search", { query: "test" }), mockRes());
     assert.ok(deps._closedDbs.includes("vec"));
+  });
+
+  it("skips indexing when sessionStore is null", async () => {
+    let indexCalled = false;
+    const deps = makeDeps({
+      openSessionStore: () => null,
+      indexContent: async () => { indexCalled = true; return 1; },
+    });
+    const handler = createHandler(deps);
+    const res = mockRes();
+    await handler(mockReq("POST", "/search", { query: "test" }), res);
+    assert.equal(res.statusCode, 200);
+    assert.ok(!indexCalled, "indexContent should not be called when sessionStore is null");
   });
 });
 

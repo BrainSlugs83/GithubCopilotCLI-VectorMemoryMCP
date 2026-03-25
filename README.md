@@ -1,5 +1,8 @@
 # vector-memory
 
+[![CI](https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/ghcp-cli-vector-memory-mcp)](https://www.npmjs.com/package/ghcp-cli-vector-memory-mcp)
+
 An [MCP](https://modelcontextprotocol.io/) server that adds **persistent long-term memory** to [**GitHub Copilot CLI**](https://docs.github.com/en/copilot/github-copilot-in-the-cli) via local semantic vector search. Copilot can recall past conversations, code changes, and decisions across all sessions — by meaning, not just keywords.
 
 > **Note:** This is a community project and is not affiliated with or endorsed by GitHub. [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli) is a product of GitHub / Microsoft.
@@ -73,9 +76,9 @@ GitHub Copilot CLI reads MCP server definitions from a JSON config file. The **u
 
 > **You do not need to clone this repo or run `npm install` yourself.** The `npx -y` command automatically downloads, installs, and runs the package from the npm registry. It caches the package locally so subsequent launches are fast.
 
-### Step 3: Restart Copilot CLI
+### Step 3: Load the server
 
-Close any running Copilot CLI session and start a new one. The MCP server will launch automatically in the background.
+Close any running Copilot CLI session and start a new one — **or** if you already have a session open, type `/mcp reload` to pick up the new config without restarting. The MCP server will launch automatically in the background.
 
 > [!IMPORTANT]
 > **The very first launch takes a few minutes.** On first run, `npx` installs the package and its
@@ -190,7 +193,7 @@ copilot.exe ──STDIO──▶ index.js (proxy) ──HTTP──▶ vector-mem
 
 ```bash
 npm run lint     # ESLint on all source files
-npm test         # 38 unit tests (node:test, zero external deps)
+npm test         # 44 unit tests with 100% coverage (node:test, zero external deps)
 npm run check    # lint + test
 ```
 
@@ -203,7 +206,7 @@ npm test
 With coverage:
 
 ```bash
-node --test --experimental-test-coverage test.js
+npm test   # coverage is enforced at 100% by default
 ```
 
 ### File overview
@@ -214,7 +217,7 @@ node --test --experimental-test-coverage test.js
 | `vector-memory-server.js` | HTTP singleton — owns model, DB, indexing |
 | `embed-worker.js` | Worker thread for ONNX embedding inference |
 | `lib.js` | Pure logic: filtering, dedup, scoring, handler factory |
-| `test.js` | 38 unit tests with DI mocks |
+| `test.js` | 44 unit tests with DI mocks, 100% coverage enforced |
 | `eslint.config.js` | Lint config |
 
 ### Manual server management
