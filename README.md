@@ -1,4 +1,4 @@
-# vector-memory
+# Vector Memory MCP Server for GitHub Copilot CLI
 
 [![CI](https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/ghcp-cli-vector-memory-mcp)](https://www.npmjs.com/package/ghcp-cli-vector-memory-mcp)
