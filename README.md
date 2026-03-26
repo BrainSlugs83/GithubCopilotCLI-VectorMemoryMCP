@@ -2,6 +2,9 @@
 
 [![CI](https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/BrainSlugs83/GithubCopilotCLI-VectorMemoryMCP/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/ghcp-cli-vector-memory-mcp)](https://www.npmjs.com/package/ghcp-cli-vector-memory-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/ghcp-cli-vector-memory-mcp)](https://www.npmjs.com/package/ghcp-cli-vector-memory-mcp)
+[![license](https://img.shields.io/npm/l/ghcp-cli-vector-memory-mcp)](LICENSE)
+[![node](https://img.shields.io/node/v/ghcp-cli-vector-memory-mcp)](package.json)
 
 An [MCP](https://modelcontextprotocol.io/) server that adds **persistent long-term memory** to [**GitHub Copilot CLI**](https://docs.github.com/en/copilot/github-copilot-in-the-cli) via local semantic vector search. Copilot can recall past conversations, code changes, and decisions across all sessions — by meaning, not just keywords.
 
