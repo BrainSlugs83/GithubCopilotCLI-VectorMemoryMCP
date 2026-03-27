@@ -27,7 +27,7 @@ const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
 
 const SERVER_DEPS_DIR = join(__dirname, ".server");
 const SERVER_DEPS_JSON = join(__dirname, "server-deps.json");
-const SERVER_FILES = ["vector-memory-server.js", "embed-worker.js", "lib.js"];
+const SERVER_FILES = ["vector-memory-server.js", "embed-worker.js", "embed-pool.js", "lib.js"];
 
 /** Check if server deps are available (either in node_modules or .server/) */
 function serverDepsInstalled() {

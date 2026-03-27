@@ -9,6 +9,7 @@ import { createServer, request as httpReq } from "http";
 import { execSync } from "child_process";
 import { userInfo } from "os";
 import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, DIMS, createHandler, userPort } from "./lib.js";
+import { createEmbedPool } from "./embed-pool.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
@@ -24,77 +25,7 @@ const IDLE_CHECK_MS = 60_000; // check every 60s
 
 let isIndexing = false;
 
-// --- Embedding via Worker Thread ---
-
-// Worker is started lazily after we win the singleton race.
-// Auto-restarts on crash to prevent zombie server state.
-let worker;
-let workerAlive = false;
-let embedIdCounter = 0;
-const pendingEmbeds = new Map(); // id → { resolve, reject }
-const EMBED_TIMEOUT_MS = 60_000;
-
-function rejectAllPending(reason) {
-  for (const [id, { reject }] of pendingEmbeds) {
-    reject(new Error(reason));
-  }
-  pendingEmbeds.clear();
-}
-
-function initWorker() {
-  worker = new Worker(join(__dirname, "embed-worker.js"));
-  workerAlive = true;
-
-  worker.on("message", (msg) => {
-    if (msg.type === "ready") return;
-    if (msg.type === "error") {
-      process.stderr.write(`[vector-memory] Embedding model error: ${msg.message}\n`);
-      return;
-    }
-    const pending = pendingEmbeds.get(msg.id);
-    if (pending) {
-      clearTimeout(pending.timer);
-      pendingEmbeds.delete(msg.id);
-      pending.resolve(msg.embedding);
-    }
-  });
-
-  worker.on("error", (err) => {
-    process.stderr.write(`[vector-memory] Worker crashed: ${err.message}\n`);
-    workerAlive = false;
-    rejectAllPending("Worker crashed: " + err.message);
-  });
-
-  worker.on("exit", (code) => {
-    workerAlive = false;
-    if (code !== 0) {
-      process.stderr.write(`[vector-memory] Worker exited with code ${code} — restarting in 2s\n`);
-      rejectAllPending("Worker exited with code " + code);
-      setTimeout(() => initWorker(), 2000);
-    }
-  });
-}
-
-function embed(text) {
-  return new Promise((resolve, reject) => {
-    if (!workerAlive) {
-      return reject(new Error("Embed worker is not running"));
-    }
-    const id = embedIdCounter++;
-    const timer = setTimeout(() => {
-      pendingEmbeds.delete(id);
-      reject(new Error("Embedding timed out after " + EMBED_TIMEOUT_MS + "ms"));
-    }, EMBED_TIMEOUT_MS);
-    pendingEmbeds.set(id, { resolve, reject, timer });
-    try {
-      worker.postMessage({ id, text });
-    } catch (err) {
-      clearTimeout(timer);
-      pendingEmbeds.delete(id);
-      reject(err);
-    }
-  });
-}
+const pool = createEmbedPool(() => new Worker(join(__dirname, "embed-worker.js")));
 
 function openVectorDb() {
   const db = new Database(VECTOR_INDEX_PATH);
@@ -154,7 +85,7 @@ async function indexContent(vecDb, items) {
   for (const item of items) {
     if (!isIndexable(item)) continue;
 
-    const embedding = await embed(item.content);
+    const embedding = await pool.embed(item.content);
     const result = insertMeta.run(item.session_id, item.source_type, item.content, item.source_id ?? null);
     if (result.changes > 0) {
       insertVec.run(BigInt(result.lastInsertRowid), embedding);
@@ -189,7 +120,7 @@ async function backgroundIndex() {
 }
 
 async function search(vecDb, query, limit = 10) {
-  const queryEmbedding = await embed(query);
+  const queryEmbedding = await pool.embed(query);
 
   const results = vecDb
     .prepare(
@@ -366,7 +297,7 @@ try {
 }
 
 // --- We won the singleton race — now do the heavy init ---
-initWorker();
+pool.initWorker();
 
 {
   const vecDb = openVectorDb();
@@ -393,7 +324,7 @@ function cleanup() {
     const pidFile = join(COPILOT_DIR, "vector-memory.pid");
     if (existsSync(pidFile)) unlinkSync(pidFile);
   } catch {}
-  if (worker) worker.terminate();
+  pool.shutdown();
   process.exit(0);
 }
 process.on("SIGTERM", cleanup);
