@@ -6,16 +6,19 @@
  * @param {number} [opts.embedTimeout=60000]       Per-embed timeout in ms.
  * @param {number} [opts.restartDelay=2000]        Delay before restarting a crashed worker.
  * @param {number} [opts.workerReadyTimeout=30000] Max time to wait for a restarting worker.
+ * @param {number} [opts.maxRestartDelay=60000]    Backoff cap for repeated restart failures.
  */
 export function createEmbedPool(workerFactory, opts = {}) {
   const EMBED_TIMEOUT_MS = opts.embedTimeout ?? 60_000;
   const RESTART_DELAY_MS = opts.restartDelay ?? 2000;
   const WORKER_READY_TIMEOUT_MS = opts.workerReadyTimeout ?? 30_000;
+  const MAX_RESTART_DELAY_MS = opts.maxRestartDelay ?? 60_000;
 
   let worker = null;
   let workerAlive = false;
   let shuttingDown = false;
   let embedIdCounter = 0;
+  let currentRestartDelay = RESTART_DELAY_MS;
   const pendingEmbeds = new Map();
 
   let workerReadyResolve = null;
@@ -33,20 +36,25 @@ export function createEmbedPool(workerFactory, opts = {}) {
 
   function scheduleRestart(code) {
     if (shuttingDown) return;
-    process.stderr.write(`[vector-memory] Worker exited (code ${code}) — restarting in ${RESTART_DELAY_MS}ms\n`);
+    const delay = currentRestartDelay;
+    process.stderr.write(`[vector-memory] Worker exited (code ${code}) — restarting in ${delay}ms\n`);
     workerReadyPromise = new Promise(resolve => { workerReadyResolve = resolve; });
     restartTimer = setTimeout(() => {
       restartTimer = null;
       try {
         initWorker();
+        currentRestartDelay = RESTART_DELAY_MS;
       } catch (err) {
         process.stderr.write(`[vector-memory] Worker restart failed: ${err.message}\n`);
+        currentRestartDelay = Math.min(currentRestartDelay * 2, MAX_RESTART_DELAY_MS);
+        scheduleRestart(code);
+        return;
       }
       if (workerReadyResolve) {
         workerReadyResolve();
         workerReadyResolve = null;
       }
-    }, RESTART_DELAY_MS);
+    }, delay);
   }
 
   function initWorker() {
@@ -76,15 +84,12 @@ export function createEmbedPool(workerFactory, opts = {}) {
 
     worker.on("exit", (code) => {
       workerAlive = false;
-      if (code !== 0) {
-        rejectAllPending("Worker exited with code " + code);
-      }
+      rejectAllPending("Worker exited with code " + code);
       scheduleRestart(code);
     });
   }
 
   async function embed(text) {
-    // If the worker is down but a restart is pending, wait for it
     if (!workerAlive && workerReadyPromise) {
       let timeoutId;
       const timeout = new Promise((_, reject) => {
