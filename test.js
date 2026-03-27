@@ -664,6 +664,54 @@ describe("createEmbedPool", () => {
     pool.shutdown();
   });
 
+  it("BUG: workerFactory() throwing in scheduleRestart leaves pool permanently hung", async () => {
+    let callCount = 0;
+    const workers = [];
+    const factory = () => {
+      callCount++;
+      if (callCount >= 2) throw new Error("Worker constructor exploded");
+      const w = new MockWorker();
+      workers.push(w);
+      return w;
+    };
+    const pool = createEmbedPool(factory, { restartDelay: 50, workerReadyTimeout: 200 });
+    pool.initWorker();
+
+    // Worker exits cleanly — scheduleRestart fires, but second initWorker() throws
+    workers[0].emit("exit", 0);
+
+    // Wait for the restart attempt to fire and throw
+    await new Promise(r => setTimeout(r, 100));
+
+    // Now try to embed — should fail fast, NOT hang until workerReadyTimeout
+    const start = Date.now();
+    await assert.rejects(() => pool.embed("hello"), /not running|constructor exploded/i);
+    const elapsed = Date.now() - start;
+
+    // If this takes close to workerReadyTimeout (200ms), the promise was stuck
+    assert.ok(elapsed < 150, `embed() took ${elapsed}ms — pool is hung on a never-resolving promise`);
+    pool.shutdown();
+  });
+
+  it("BUG: shutdown during restart delay still spawns zombie worker", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 200 });
+    pool.initWorker();
+
+    // Worker exits — restart is scheduled with 200ms delay
+    factory.workers[0].emit("exit", 1);
+
+    // Shutdown immediately (before the 200ms restart fires)
+    pool.shutdown();
+
+    // Wait for the restart timer to fire
+    await new Promise(r => setTimeout(r, 350));
+
+    // Should NOT have created a second worker — shutdown should cancel the restart
+    assert.equal(factory.workers.length, 1,
+      `Expected 1 worker but got ${factory.workers.length} — zombie worker spawned after shutdown`);
+  });
+
   it("shutdown resolves pending restart waiters", async () => {
     const factory = mockWorkerFactory();
     const pool = createEmbedPool(factory, { restartDelay: 10000, workerReadyTimeout: 5000 });

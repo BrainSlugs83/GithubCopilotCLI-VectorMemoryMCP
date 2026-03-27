@@ -29,12 +29,19 @@ export function createEmbedPool(workerFactory, opts = {}) {
     pendingEmbeds.clear();
   }
 
+  let restartTimer = null;
+
   function scheduleRestart(code) {
     if (shuttingDown) return;
     process.stderr.write(`[vector-memory] Worker exited (code ${code}) — restarting in ${RESTART_DELAY_MS}ms\n`);
     workerReadyPromise = new Promise(resolve => { workerReadyResolve = resolve; });
-    setTimeout(() => {
-      initWorker();
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      try {
+        initWorker();
+      } catch (err) {
+        process.stderr.write(`[vector-memory] Worker restart failed: ${err.message}\n`);
+      }
       if (workerReadyResolve) {
         workerReadyResolve();
         workerReadyResolve = null;
@@ -116,6 +123,10 @@ export function createEmbedPool(workerFactory, opts = {}) {
 
   function shutdown() {
     shuttingDown = true;
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    }
     rejectAllPending("Pool shutting down");
     if (worker) {
       worker.terminate();
