@@ -1,7 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
+import { EventEmitter } from "node:events";
 import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, userPort, BASE_PORT, MIN_SCORE, createHandler } from "./lib.js";
+import { createEmbedPool } from "./embed-pool.js";
 
 // --- Mock helpers for handler tests ---
 
@@ -444,5 +446,500 @@ describe("handleRequest - /reindex", () => {
     await handler(mockReq("POST", "/reindex"), res);
     assert.equal(deps.getIsIndexing(), false);
     assert.equal(res.statusCode, 500);
+  });
+});
+
+// --- MockWorker for embed pool tests ---
+
+class MockWorker extends EventEmitter {
+  constructor() {
+    super();
+    this.messages = [];
+    this.terminated = false;
+  }
+  postMessage(msg) {
+    this.messages.push(msg);
+  }
+  terminate() {
+    this.terminated = true;
+  }
+}
+
+function mockWorkerFactory() {
+  const workers = [];
+  const factory = () => {
+    const w = new MockWorker();
+    workers.push(w);
+    return w;
+  };
+  factory.workers = workers;
+  return factory;
+}
+
+// --- Embed pool tests ---
+
+describe("createEmbedPool", () => {
+  it("embeds text through the worker (happy path)", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    const p = pool.embed("hello");
+    const msg = factory.workers[0].messages[0];
+    factory.workers[0].emit("message", { id: msg.id, embedding: Buffer.from([1, 2, 3]) });
+
+    const result = await p;
+    assert.deepEqual(result, Buffer.from([1, 2, 3]));
+    pool.shutdown();
+  });
+
+  it("rejects embed when worker was never started", async () => {
+    const pool = createEmbedPool(() => new MockWorker());
+    await assert.rejects(() => pool.embed("hello"), /Embed worker is not running/);
+  });
+
+  it("rejects pending embeds on worker error", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    const p = pool.embed("hello");
+    factory.workers[0].emit("error", new Error("segfault"));
+
+    await assert.rejects(() => p, /Worker crashed/);
+    pool.shutdown();
+  });
+
+  it("restarts worker on non-zero exit", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+
+    factory.workers[0].emit("exit", 1);
+    await new Promise(r => setTimeout(r, 100));
+
+    assert.equal(factory.workers.length, 2, "worker should have been recreated");
+    assert.equal(pool.isAlive(), true);
+    pool.shutdown();
+  });
+
+  // === BUG TESTS: these demonstrate the issues we're fixing ===
+
+  it("restarts worker on code-0 exit (bug: currently does not)", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+
+    factory.workers[0].emit("exit", 0);
+    await new Promise(r => setTimeout(r, 100));
+
+    assert.equal(factory.workers.length, 2, "worker should restart even on clean exit");
+    assert.equal(pool.isAlive(), true, "pool should be alive after code-0 restart");
+    pool.shutdown();
+  });
+
+  it("waits for worker restart instead of rejecting immediately (bug: currently rejects)", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50, workerReadyTimeout: 5000 });
+    pool.initWorker();
+
+    // Crash the worker
+    factory.workers[0].emit("exit", 1);
+
+    // Immediately try to embed — should wait for restart, not reject
+    let rejected = false;
+    let error = null;
+    const embedPromise = pool.embed("test text")
+      .catch(e => { rejected = true; error = e; });
+
+    // Give microtasks a chance to settle (synchronous rejection would be caught here)
+    await new Promise(r => setTimeout(r, 10));
+
+    assert.equal(rejected, false,
+      `embed() rejected immediately with "${error?.message}" instead of waiting for worker restart`);
+
+    // Let restart happen
+    await new Promise(r => setTimeout(r, 100));
+
+    // Respond from new worker
+    assert.equal(factory.workers.length, 2, "worker should have restarted");
+    const msg = factory.workers[1].messages[0];
+    factory.workers[1].emit("message", { id: msg.id, embedding: Buffer.from([4, 5, 6]) });
+
+    await embedPromise;
+    assert.equal(rejected, false);
+    pool.shutdown();
+  });
+
+  it("does not restart after explicit shutdown", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+    pool.shutdown();
+
+    factory.workers[0].emit("exit", 1);
+    await new Promise(r => setTimeout(r, 100));
+
+    assert.equal(factory.workers.length, 1, "should not restart after shutdown");
+  });
+
+  it("times out if worker restart takes too long", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 10000, workerReadyTimeout: 50 });
+    pool.initWorker();
+
+    factory.workers[0].emit("exit", 1);
+
+    await assert.rejects(() => pool.embed("test"), /restart timed out/i);
+    pool.shutdown();
+  });
+
+  it("handles worker 'error' message type (model error)", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    // Send an error-type message (model failed to load, etc.)
+    factory.workers[0].emit("message", { type: "error", message: "ONNX load failed" });
+
+    // Pool should still be alive — this is a non-fatal model error, not a crash
+    assert.equal(pool.isAlive(), true);
+    pool.shutdown();
+  });
+
+  it("times out embed when worker never responds", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { embedTimeout: 50 });
+    pool.initWorker();
+
+    // Send an embed but never respond from the mock worker
+    await assert.rejects(() => pool.embed("hello"), /timed out after 50ms/);
+    pool.shutdown();
+  });
+
+  it("rejects embed when postMessage throws", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    // Make postMessage throw (simulates worker in bad state)
+    factory.workers[0].postMessage = () => { throw new Error("DataCloneError"); };
+
+    await assert.rejects(() => pool.embed("hello"), /DataCloneError/);
+    pool.shutdown();
+  });
+
+  it("ignores 'ready' message type without affecting pending embeds", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    const p = pool.embed("hello");
+    // Send a ready message — should be ignored, embed still pending
+    factory.workers[0].emit("message", { type: "ready" });
+
+    // Now send the real response
+    const msg = factory.workers[0].messages[0];
+    factory.workers[0].emit("message", { id: msg.id, embedding: Buffer.from([9]) });
+
+    const result = await p;
+    assert.deepEqual(result, Buffer.from([9]));
+    pool.shutdown();
+  });
+
+  it("ignores response for unknown embed id", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    // Send a response for an ID that was never requested — should not throw
+    factory.workers[0].emit("message", { id: 99999, embedding: Buffer.from([1]) });
+    pool.shutdown();
+  });
+
+  it("shutdown is idempotent when no worker was started", () => {
+    const pool = createEmbedPool(() => new MockWorker());
+    // Should not throw
+    pool.shutdown();
+    pool.shutdown();
+  });
+
+  it("BUG: workerFactory() throwing in scheduleRestart retries with backoff", async () => {
+    let callCount = 0;
+    const workers = [];
+    const factory = () => {
+      callCount++;
+      if (callCount === 2) throw new Error("Worker constructor exploded");
+      const w = new MockWorker();
+      workers.push(w);
+      return w;
+    };
+    const pool = createEmbedPool(factory, { restartDelay: 50, workerReadyTimeout: 2000, maxRestartDelay: 200 });
+    pool.initWorker();
+
+    // Worker exits cleanly — first restart throws, second should succeed via backoff
+    workers[0].emit("exit", 0);
+
+    // Wait for retry
+    await new Promise(r => setTimeout(r, 500));
+
+    assert.ok(callCount >= 3, `Expected at least 3 factory calls, got ${callCount}`);
+    assert.equal(pool.isAlive(), true, "pool should recover via backoff retry");
+    pool.shutdown();
+  });
+
+  it("BUG: shutdown during restart delay still spawns zombie worker", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+
+    // Worker exits — restart is scheduled with 50ms delay
+    factory.workers[0].emit("exit", 1);
+
+    // Shutdown immediately (before the 50ms restart fires)
+    pool.shutdown();
+
+    // Wait for the restart timer to fire (guard should catch it)
+    await new Promise(r => setTimeout(r, 150));
+
+    // Should NOT have created a second worker — guard prevents it
+    assert.equal(factory.workers.length, 1,
+      `Expected 1 worker but got ${factory.workers.length} — zombie worker spawned after shutdown`);
+  });
+
+  it("shutdown resolves pending restart waiters", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 10000, workerReadyTimeout: 5000 });
+    pool.initWorker();
+
+    // Trigger exit — restart is scheduled but slow
+    factory.workers[0].emit("exit", 1);
+
+    // Start an embed — it will wait for the restart
+    const embedPromise = pool.embed("hello").catch(e => e);
+
+    // Shutdown while it's waiting
+    pool.shutdown();
+
+    const result = await embedPromise;
+    assert.ok(result instanceof Error);
+    assert.match(result.message, /not running|shutting down/i);
+  });
+
+  // === BUG: code-0 exit orphans in-flight embeds ===
+
+  it("BUG: code-0 exit rejects in-flight embeds (not orphaned for 60s)", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { embedTimeout: 5000, restartDelay: 50 });
+    pool.initWorker();
+
+    // Start an embed (worker won't respond)
+    const embedPromise = pool.embed("hello").catch(e => e);
+    await new Promise(r => setTimeout(r, 10));
+
+    // Worker exits cleanly — in-flight embed should be rejected promptly
+    const start = Date.now();
+    factory.workers[0].emit("exit", 0);
+
+    const result = await embedPromise;
+    const elapsed = Date.now() - start;
+
+    assert.ok(result instanceof Error, "in-flight embed should have been rejected");
+    assert.ok(elapsed < 1000,
+      `embed took ${elapsed}ms to reject — orphaned until embedTimeout instead of rejected on exit`);
+    pool.shutdown();
+  });
+
+  // === BUG: failed restart = permanent death (no retry) ===
+
+  it("BUG: failed restart retries with backoff instead of dying permanently", async () => {
+    let callCount = 0;
+    const workers = [];
+    const factory = () => {
+      callCount++;
+      // Fail on attempts 2 and 3, succeed on attempt 4
+      if (callCount >= 2 && callCount <= 3) throw new Error("ONNX load failed");
+      const w = new MockWorker();
+      workers.push(w);
+      return w;
+    };
+    const pool = createEmbedPool(factory, {
+      restartDelay: 30,
+      workerReadyTimeout: 5000,
+      maxRestartDelay: 200,
+    });
+    pool.initWorker();
+
+    // Worker exits — first restart attempt will fail, second will fail, third should succeed
+    workers[0].emit("exit", 0);
+
+    // Wait for backoff retries to play out
+    await new Promise(r => setTimeout(r, 1500));
+
+    assert.ok(callCount >= 4,
+      `Expected at least 4 factory calls (1 init + 2 failures + 1 success), got ${callCount}`);
+    assert.equal(pool.isAlive(), true, "pool should have recovered after transient failures");
+    pool.shutdown();
+  });
+
+  it("POSITIVE: backoff delay increases on consecutive failures", async () => {
+    let callCount = 0;
+    const timestamps = [];
+    const workers = [];
+    const factory = () => {
+      callCount++;
+      timestamps.push(Date.now());
+      if (callCount >= 2) throw new Error("still broken");
+      const w = new MockWorker();
+      workers.push(w);
+      return w;
+    };
+    const pool = createEmbedPool(factory, {
+      restartDelay: 50,
+      workerReadyTimeout: 5000,
+      maxRestartDelay: 400,
+    });
+    pool.initWorker();
+
+    workers[0].emit("exit", 0);
+    // Wait for several backoff attempts
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Should have multiple attempts with increasing gaps
+    assert.ok(callCount >= 4, `Expected at least 4 attempts, got ${callCount}`);
+
+    // Verify delays are increasing (backoff)
+    for (let i = 2; i < timestamps.length - 1; i++) {
+      const gap1 = timestamps[i] - timestamps[i - 1];
+      const gap2 = timestamps[i + 1] - timestamps[i];
+      assert.ok(gap2 >= gap1 * 0.8,  // allow 20% timing jitter
+        `Expected increasing delays but gap ${i}: ${gap1}ms, gap ${i+1}: ${gap2}ms`);
+    }
+    pool.shutdown();
+  });
+
+  it("POSITIVE: backoff resets after a successful restart", async () => {
+    let callCount = 0;
+    const workers = [];
+    const factory = () => {
+      callCount++;
+      // Fail on second call, succeed on all others
+      if (callCount === 2) throw new Error("transient failure");
+      const w = new MockWorker();
+      workers.push(w);
+      return w;
+    };
+    const pool = createEmbedPool(factory, {
+      restartDelay: 30,
+      workerReadyTimeout: 5000,
+      maxRestartDelay: 500,
+    });
+    pool.initWorker();
+
+    // First exit → restart fails → retries → succeeds
+    workers[0].emit("exit", 0);
+    await new Promise(r => setTimeout(r, 500));
+
+    assert.equal(pool.isAlive(), true, "pool should have recovered");
+    const secondWorkerIdx = workers.length - 1;
+
+    // Second exit → should restart with initial delay (not backoff from previous failure)
+    workers[secondWorkerIdx].emit("exit", 0);
+    await new Promise(r => setTimeout(r, 200));
+
+    assert.equal(pool.isAlive(), true, "pool should restart at base delay after prior success");
+    pool.shutdown();
+  });
+
+  it("POSITIVE: backoff caps at maxRestartDelay", async () => {
+    let callCount = 0;
+    const timestamps = [];
+    const workers = [];
+    const factory = () => {
+      callCount++;
+      timestamps.push(Date.now());
+      if (callCount >= 2) throw new Error("permanently broken");
+      const w = new MockWorker();
+      workers.push(w);
+      return w;
+    };
+    const pool = createEmbedPool(factory, {
+      restartDelay: 50,
+      maxRestartDelay: 150,
+    });
+    pool.initWorker();
+    workers[0].emit("exit", 0);
+
+    await new Promise(r => setTimeout(r, 2000));
+
+    // All gaps after the first few should be capped at ~150ms
+    const gaps = [];
+    for (let i = 1; i < timestamps.length; i++) {
+      gaps.push(timestamps[i] - timestamps[i - 1]);
+    }
+    // The last few gaps should all be ≤ maxRestartDelay + jitter
+    const lastGaps = gaps.slice(-3);
+    for (const gap of lastGaps) {
+      assert.ok(gap <= 250,
+        `Gap ${gap}ms exceeds maxRestartDelay (150ms) + reasonable jitter`);
+    }
+    pool.shutdown();
+  });
+
+  it("shutdown cancels pending restart timer", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+
+    // Trigger exit — restart timer starts
+    factory.workers[0].emit("exit", 1);
+
+    // Shutdown immediately — should cancel the restart
+    pool.shutdown();
+
+    // Wait for timer that would have fired
+    await new Promise(r => setTimeout(r, 100));
+
+    // Should NOT have created a second worker
+    assert.equal(factory.workers.length, 1, "shutdown should cancel pending restart");
+  });
+
+  it("belt-and-suspenders: shuttingDown guard catches callback when clearTimeout fails", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+
+    // Worker exits — restart timer is scheduled
+    factory.workers[0].emit("exit", 1);
+
+    // Monkeypatch clearTimeout to a no-op, simulating a race where
+    // the timer callback is already queued when shutdown tries to cancel it
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.clearTimeout = () => {};
+
+    try {
+      pool.shutdown();
+    } finally {
+      globalThis.clearTimeout = realClearTimeout;
+    }
+
+    // Timer fires because clearTimeout was neutered — the shuttingDown guard catches it
+    await new Promise(r => setTimeout(r, 150));
+
+    // No zombie worker spawned — guard did its job
+    assert.equal(factory.workers.length, 1,
+      "shuttingDown guard should prevent zombie worker when clearTimeout fails");
+  });
+
+  it("uses default options when none provided", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    const p = pool.embed("test");
+    const msg = factory.workers[0].messages[0];
+    factory.workers[0].emit("message", { id: msg.id, embedding: Buffer.from([1]) });
+    await p;
+    pool.shutdown();
   });
 });
