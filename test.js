@@ -690,19 +690,19 @@ describe("createEmbedPool", () => {
 
   it("BUG: shutdown during restart delay still spawns zombie worker", async () => {
     const factory = mockWorkerFactory();
-    const pool = createEmbedPool(factory, { restartDelay: 200 });
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
     pool.initWorker();
 
-    // Worker exits — restart is scheduled with 200ms delay
+    // Worker exits — restart is scheduled with 50ms delay
     factory.workers[0].emit("exit", 1);
 
-    // Shutdown immediately (before the 200ms restart fires)
+    // Shutdown immediately (before the 50ms restart fires)
     pool.shutdown();
 
-    // Wait for the restart timer to fire
-    await new Promise(r => setTimeout(r, 350));
+    // Wait for the restart timer to fire (guard should catch it)
+    await new Promise(r => setTimeout(r, 150));
 
-    // Should NOT have created a second worker — shutdown should cancel the restart
+    // Should NOT have created a second worker — guard prevents it
     assert.equal(factory.workers.length, 1,
       `Expected 1 worker but got ${factory.workers.length} — zombie worker spawned after shutdown`);
   });
@@ -902,6 +902,33 @@ describe("createEmbedPool", () => {
 
     // Should NOT have created a second worker
     assert.equal(factory.workers.length, 1, "shutdown should cancel pending restart");
+  });
+
+  it("belt-and-suspenders: shuttingDown guard catches callback when clearTimeout fails", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+
+    // Worker exits — restart timer is scheduled
+    factory.workers[0].emit("exit", 1);
+
+    // Monkeypatch clearTimeout to a no-op, simulating a race where
+    // the timer callback is already queued when shutdown tries to cancel it
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.clearTimeout = () => {};
+
+    try {
+      pool.shutdown();
+    } finally {
+      globalThis.clearTimeout = realClearTimeout;
+    }
+
+    // Timer fires because clearTimeout was neutered — the shuttingDown guard catches it
+    await new Promise(r => setTimeout(r, 150));
+
+    // No zombie worker spawned — guard did its job
+    assert.equal(factory.workers.length, 1,
+      "shuttingDown guard should prevent zombie worker when clearTimeout fails");
   });
 
   it("uses default options when none provided", async () => {

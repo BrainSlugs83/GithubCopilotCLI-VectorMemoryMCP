@@ -41,6 +41,7 @@ export function createEmbedPool(workerFactory, opts = {}) {
     workerReadyPromise = new Promise(resolve => { workerReadyResolve = resolve; });
     restartTimer = setTimeout(() => {
       restartTimer = null;
+      if (shuttingDown) return;
       try {
         initWorker();
         currentRestartDelay = RESTART_DELAY_MS;
@@ -128,10 +129,7 @@ export function createEmbedPool(workerFactory, opts = {}) {
 
   function shutdown() {
     shuttingDown = true;
-    if (restartTimer) {
-      clearTimeout(restartTimer);
-      restartTimer = null;
-    }
+    clearTimeout(restartTimer);
     rejectAllPending("Pool shutting down");
     if (worker) {
       worker.terminate();
