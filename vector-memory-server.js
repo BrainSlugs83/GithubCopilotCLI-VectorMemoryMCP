@@ -14,7 +14,7 @@ import { createEmbedPool } from "./embed-pool.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
 const SERVER_USER = userInfo().username;
-const COPILOT_DIR = join(homedir(), ".copilot");
+const COPILOT_DIR = process.env.VECTOR_MEMORY_DATA_DIR || join(homedir(), ".copilot");
 const SESSION_STORE_PATH = join(COPILOT_DIR, "session-store.db");
 const VECTOR_INDEX_PATH = join(COPILOT_DIR, "vector-index.db");
 const INDEX_INTERVAL_MS = 15 * 60 * 1000;

@@ -11,7 +11,7 @@ import { request } from "http";
 import { userInfo } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const COPILOT_DIR = join(homedir(), ".copilot");
+const COPILOT_DIR = process.env.VECTOR_MEMORY_DATA_DIR || join(homedir(), ".copilot");
 const EXPECTED_USER = userInfo().username;
 const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
 
