@@ -156,3 +156,62 @@ export function createHandler(deps) {
     }
   };
 }
+
+/**
+ * Share one in-flight async call between concurrent callers. A rejection clears the
+ * memo so the next call retries. Prevents parallel model loads racing one download.
+ */
+export function memoizeAsync(fn) {
+  let promise = null;
+  return () => {
+    if (!promise) {
+      promise = fn().catch((err) => {
+        promise = null;
+        throw err;
+      });
+    }
+    return promise;
+  };
+}
+
+/**
+ * Like memoizeAsync, but forgets the call once it settles: concurrent callers share one
+ * run, and the next call after it finishes starts a fresh one.
+ */
+export function singleFlight(fn) {
+  let promise = null;
+  return () => {
+    if (!promise) {
+      promise = fn().finally(() => { promise = null; });
+    }
+    return promise;
+  };
+}
+
+/**
+ * The model library writes downloads straight to their final path and treats "file exists"
+ * as cached, so an interrupted download leaves a truncated model forever. We record the
+ * model's size in a marker after a successful load; a model without a matching marker is
+ * incomplete and its directory is deleted so the next load re-downloads it.
+ * @returns {boolean} true if the cache directory was deleted.
+ */
+export function purgeIncompleteModel({ modelPath, markerPath, modelDir }, fsOps) {
+  let size;
+  try {
+    size = fsOps.statSync(modelPath).size;
+  } catch {
+    return false;
+  }
+  let recorded = NaN;
+  try {
+    recorded = parseInt(fsOps.readFileSync(markerPath, "utf-8"), 10);
+  } catch { /* no marker: never completed */ }
+  if (recorded === size) return false;
+  fsOps.rmSync(modelDir, { recursive: true, force: true });
+  return true;
+}
+
+/** Record that the model at modelPath loaded successfully (see purgeIncompleteModel). */
+export function markModelComplete({ modelPath, markerPath }, fsOps) {
+  fsOps.writeFileSync(markerPath, String(fsOps.statSync(modelPath).size));
+}

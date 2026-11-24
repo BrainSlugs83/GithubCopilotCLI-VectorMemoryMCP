@@ -151,7 +151,7 @@ const handleRequest = createHandler({
   runMaintenance,
   getIsIndexing: () => isIndexing,
   setIsIndexing: (v) => { isIndexing = v; },
-  getIdentity: () => ({ user: SERVER_USER, version: PKG.version }),
+  getIdentity: () => ({ user: SERVER_USER, version: PKG.version, ready: pool.isReady() }),
 });
 
 let lastActivity = Date.now();
@@ -190,10 +190,11 @@ function getProcessInfo(pid) {
 
 
 
-// More reliable than process name: check if the server speaks our protocol
-async function isOurProtocol() {
+// More reliable than process name: check if the server speaks our protocol.
+// Returns the ping payload (truthy) if it does, otherwise null.
+async function ourProtocolPing() {
   const result = await httpPost("/ping", {}, 3000);
-  return result?.ok === true;
+  return result?.ok === true ? result : null;
 }
 
 function httpPost(path, body, timeoutMs = 10000) {
@@ -250,7 +251,11 @@ try {
   const info = ownerPid ? getProcessInfo(ownerPid) : null;
 
   // First check: does whatever's on the port speak our protocol?
-  if (await isOurProtocol()) {
+  const owner = await ourProtocolPing();
+  if (owner) {
+    // Still loading its model (first run downloads ~34 MB): it's warming up, not a zombie.
+    // Killing it here would interrupt the download and break the next start.
+    if (owner.ready === false) process.exit(0);
     // It's a vector-memory server — deep health check with actual search
     const searchResult = await httpPost("/search", { query: "health check", limit: 1 }, 15000);
     if (Array.isArray(searchResult) || (searchResult && searchResult.error == null)) {

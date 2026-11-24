@@ -2,42 +2,47 @@ import { parentPort } from "worker_threads";
 import { pipeline } from "@huggingface/transformers";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { statSync, rmSync } from "fs";
+import * as fs from "fs";
+import { memoizeAsync, purgeIncompleteModel, markModelComplete } from "./lib.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MODEL_DIR = join(__dirname, "node_modules", "@huggingface", "transformers", ".cache",
   "Xenova", "gte-small");
-const MODEL_PATH = join(MODEL_DIR, "onnx", "model_quantized.onnx");
-const MIN_MODEL_SIZE = 5_000_000; // 5MB — real model is ~34MB
+const MODEL_FILES = {
+  modelDir: MODEL_DIR,
+  modelPath: join(MODEL_DIR, "onnx", "model_quantized.onnx"),
+  markerPath: join(MODEL_DIR, ".complete"),
+};
 
-// Delete corrupt/truncated model so the library re-downloads it
-try {
-  const size = statSync(MODEL_PATH).size;
-  if (size < MIN_MODEL_SIZE) {
-    rmSync(MODEL_DIR, { recursive: true, force: true });
+function purge() {
+  try {
+    if (purgeIncompleteModel(MODEL_FILES, fs)) {
+      process.stderr.write("[vector-memory] Deleted incomplete embedding model; re-downloading.\n");
+    }
+  } catch (err) {
+    process.stderr.write(`[vector-memory] Could not delete incomplete model: ${err.message}\n`);
   }
-} catch {}
-
-let extractor = null;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function getExtractor() {
-  if (!extractor) {
-    // Retry with backoff — Windows Defender can lock newly downloaded files
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        extractor = await pipeline("feature-extraction", "Xenova/gte-small", { dtype: "q8" });
-        parentPort.postMessage({ type: "ready" });
-        return extractor;
-      } catch (err) {
-        if (attempt === 3) throw err;
-        await sleep(attempt * 3000);
-      }
+// Every caller shares ONE load. Parallel loads would read the half-written download
+// (EACCES / "Protobuf parsing failed"), crash this thread and truncate the download.
+const getExtractor = memoizeAsync(async () => {
+  for (let attempt = 1; ; attempt++) {
+    purge();
+    try {
+      const extractor = await pipeline("feature-extraction", "Xenova/gte-small", { dtype: "q8" });
+      markModelComplete(MODEL_FILES, fs);
+      parentPort.postMessage({ type: "ready" });
+      return extractor;
+    } catch (err) {
+      // Retry with backoff -- Windows Defender can lock newly downloaded files
+      if (attempt === 3) throw err;
+      await sleep(attempt * 3000);
     }
   }
-  return extractor;
-}
+});
 
 // Pre-warm the model on startup
 getExtractor().catch((err) => {
@@ -45,9 +50,13 @@ getExtractor().catch((err) => {
 });
 
 parentPort.on("message", async ({ id, text }) => {
-  const ext = await getExtractor();
-  const truncated = text.length > 2000 ? text.slice(0, 2000) : text;
-  const output = await ext(truncated, { pooling: "mean", normalize: true });
-  const buffer = Buffer.from(output.data.buffer);
-  parentPort.postMessage({ id, embedding: buffer });
+  try {
+    const ext = await getExtractor();
+    const truncated = text.length > 2000 ? text.slice(0, 2000) : text;
+    const output = await ext(truncated, { pooling: "mean", normalize: true });
+    const buffer = Buffer.from(output.data.buffer);
+    parentPort.postMessage({ id, embedding: buffer });
+  } catch (err) {
+    parentPort.postMessage({ id, error: err.message });
+  }
 });

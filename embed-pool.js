@@ -16,6 +16,7 @@ export function createEmbedPool(workerFactory, opts = {}) {
 
   let worker = null;
   let workerAlive = false;
+  let modelReady = false;
   let shuttingDown = false;
   let embedIdCounter = 0;
   let currentRestartDelay = RESTART_DELAY_MS;
@@ -61,10 +62,14 @@ export function createEmbedPool(workerFactory, opts = {}) {
   function initWorker() {
     worker = workerFactory();
     workerAlive = true;
+    modelReady = false;
     workerReadyPromise = null;
 
     worker.on("message", (msg) => {
-      if (msg.type === "ready") return;
+      if (msg.type === "ready") {
+        modelReady = true;
+        return;
+      }
       if (msg.type === "error") {
         process.stderr.write(`[vector-memory] Embedding model error: ${msg.message}\n`);
         return;
@@ -73,7 +78,8 @@ export function createEmbedPool(workerFactory, opts = {}) {
       if (pending) {
         clearTimeout(pending.timer);
         pendingEmbeds.delete(msg.id);
-        pending.resolve(msg.embedding);
+        if (msg.error) pending.reject(new Error("Embedding failed: " + msg.error));
+        else pending.resolve(msg.embedding);
       }
     });
 
@@ -142,5 +148,5 @@ export function createEmbedPool(workerFactory, opts = {}) {
     }
   }
 
-  return { embed, initWorker, shutdown, isAlive: () => workerAlive };
+  return { embed, initWorker, shutdown, isAlive: () => workerAlive, isReady: () => workerAlive && modelReady };
 }

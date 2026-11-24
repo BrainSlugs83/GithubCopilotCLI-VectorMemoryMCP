@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
-import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, userPort, BASE_PORT, MIN_SCORE, createHandler } from "./lib.js";
+import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, userPort, BASE_PORT, MIN_SCORE, createHandler, memoizeAsync, singleFlight, purgeIncompleteModel, markModelComplete } from "./lib.js";
 import { createEmbedPool } from "./embed-pool.js";
 
 // --- Mock helpers for handler tests ---
@@ -493,6 +493,35 @@ describe("createEmbedPool", () => {
     pool.shutdown();
   });
 
+  it("rejects an embed the worker reports as failed, without killing the worker", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory);
+    pool.initWorker();
+
+    const p = pool.embed("hello");
+    const msg = factory.workers[0].messages[0];
+    factory.workers[0].emit("message", { id: msg.id, error: "Protobuf parsing failed" });
+
+    await assert.rejects(() => p, /Embedding failed: Protobuf parsing failed/);
+    assert.equal(pool.isAlive(), true);
+    pool.shutdown();
+  });
+
+  it("reports ready only after the worker loads its model, and not after it dies", async () => {
+    const factory = mockWorkerFactory();
+    const pool = createEmbedPool(factory, { restartDelay: 50 });
+    pool.initWorker();
+    assert.equal(pool.isReady(), false, "warming up: model still loading");
+
+    factory.workers[0].emit("message", { type: "ready" });
+    assert.equal(pool.isReady(), true);
+
+    factory.workers[0].emit("exit", 1);
+    assert.equal(pool.isReady(), false);
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal(pool.isReady(), false, "restarted worker must load the model again");
+    pool.shutdown();
+  });
   it("rejects embed when worker was never started", async () => {
     const pool = createEmbedPool(() => new MockWorker());
     await assert.rejects(() => pool.embed("hello"), /Embed worker is not running/);
@@ -941,5 +970,81 @@ describe("createEmbedPool", () => {
     factory.workers[0].emit("message", { id: msg.id, embedding: Buffer.from([1]) });
     await p;
     pool.shutdown();
+  });
+});
+
+describe("memoizeAsync", () => {
+  it("shares one in-flight call between concurrent callers", async () => {
+    let calls = 0;
+    let release;
+    const get = memoizeAsync(() => { calls++; return new Promise(r => { release = r; }); });
+    const a = get();
+    const b = get();
+    release("model");
+    assert.deepEqual(await Promise.all([a, b]), ["model", "model"]);
+    assert.equal(calls, 1);
+  });
+
+  it("retries on the next call after a rejection", async () => {
+    let calls = 0;
+    const get = memoizeAsync(async () => { if (++calls === 1) throw new Error("EACCES"); return "ok"; });
+    await assert.rejects(get, /EACCES/);
+    assert.equal(await get(), "ok");
+    assert.equal(calls, 2);
+  });
+});
+
+describe("purgeIncompleteModel / markModelComplete", () => {
+  const paths = { modelDir: "D", modelPath: "D/m.onnx", markerPath: "D/.complete" };
+  function fakeFs(files) {
+    return {
+      files,
+      removed: [],
+      statSync(p) { if (!(p in files)) throw new Error("ENOENT"); return { size: files[p].length }; },
+      readFileSync(p) { if (!(p in files)) throw new Error("ENOENT"); return files[p]; },
+      writeFileSync(p, data) { files[p] = data; },
+      rmSync(p) { this.removed.push(p); },
+    };
+  }
+
+  it("does nothing when the model has not been downloaded", () => {
+    const fs = fakeFs({});
+    assert.equal(purgeIncompleteModel(paths, fs), false);
+    assert.deepEqual(fs.removed, []);
+  });
+
+  it("deletes a model that never completed (no marker): the truncated-download case", () => {
+    const fs = fakeFs({ "D/m.onnx": "x".repeat(15) });
+    assert.equal(purgeIncompleteModel(paths, fs), true);
+    assert.deepEqual(fs.removed, ["D"]);
+  });
+
+  it("deletes a model whose size no longer matches its marker", () => {
+    const fs = fakeFs({ "D/m.onnx": "x".repeat(15), "D/.complete": "34" });
+    assert.equal(purgeIncompleteModel(paths, fs), true);
+  });
+
+  it("keeps a model marked complete at its current size", () => {
+    const fs = fakeFs({ "D/m.onnx": "x".repeat(34) });
+    markModelComplete(paths, fs);
+    assert.equal(fs.files["D/.complete"], "34");
+    assert.equal(purgeIncompleteModel(paths, fs), false);
+    assert.deepEqual(fs.removed, []);
+  });
+});
+
+describe("singleFlight", () => {
+  it("shares one run between concurrent callers, then starts fresh once it settles", async () => {
+    let calls = 0;
+    const launch = singleFlight(async () => ++calls);
+    assert.deepEqual(await Promise.all([launch(), launch()]), [1, 1]);
+    assert.equal(await launch(), 2);
+  });
+
+  it("starts fresh after a rejection", async () => {
+    let calls = 0;
+    const launch = singleFlight(async () => { if (++calls === 1) throw new Error("boom"); return calls; });
+    await assert.rejects(launch, /boom/);
+    assert.equal(await launch(), 2);
   });
 });

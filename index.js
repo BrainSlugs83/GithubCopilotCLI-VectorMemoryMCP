@@ -15,7 +15,7 @@ const COPILOT_DIR = process.env.VECTOR_MEMORY_DATA_DIR || join(homedir(), ".copi
 const EXPECTED_USER = userInfo().username;
 const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
 
-import { userPort } from "./lib.js";
+import { userPort, singleFlight } from "./lib.js";
 const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || String(userPort(EXPECTED_USER)), 10);
 const SERVER_URL = `http://127.0.0.1:${PORT}`;
 const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
@@ -158,7 +158,12 @@ function isProcessAlive(pid) {
   }
 }
 
-async function ensureServer() {
+// Concurrent callers (startup, keepalive, a tool call's retry) share one launch. Without this,
+// two callers both spawn a server after the first-run install, and the loser's health check
+// kills the winner mid model download.
+const ensureServer = singleFlight(launchServerIfNeeded);
+
+async function launchServerIfNeeded() {
   // Check if already running
   const existing = await ping();
   if (existing) {
