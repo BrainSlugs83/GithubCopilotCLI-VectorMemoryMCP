@@ -215,3 +215,22 @@ export function purgeIncompleteModel({ modelPath, markerPath, modelDir }, fsOps)
 export function markModelComplete({ modelPath, markerPath }, fsOps) {
   fsOps.writeFileSync(markerPath, String(fsOps.statSync(modelPath).size));
 }
+
+/**
+ * Stamp written to .server/.version after installing server deps. Includes the Node ABI
+ * (process.versions.modules) because native deps such as better-sqlite3 are compiled for
+ * one ABI: after a Node upgrade the old binaries fail to load and the server dies at start.
+ */
+export function serverDepsStamp(version, nodeAbi) {
+  return `${version} node-abi-${nodeAbi}`;
+}
+
+/**
+ * True if an existing .server install was built for a different (or unrecorded) Node ABI,
+ * so `npm install` alone would keep incompatible native binaries and a rebuild is needed.
+ * @param {string|null} previousStamp contents of .server/.version, or null if absent.
+ */
+export function needsNativeRebuild(previousStamp, nodeAbi) {
+  if (previousStamp == null) return false;
+  return !previousStamp.trim().endsWith(` node-abi-${nodeAbi}`);
+}

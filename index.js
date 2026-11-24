@@ -6,7 +6,7 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
-import { existsSync, readFileSync, mkdirSync, writeFileSync, copyFileSync } from "fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, copyFileSync, openSync, closeSync, statSync } from "fs";
 import { request } from "http";
 import { userInfo } from "os";
 
@@ -15,10 +15,12 @@ const COPILOT_DIR = process.env.VECTOR_MEMORY_DATA_DIR || join(homedir(), ".copi
 const EXPECTED_USER = userInfo().username;
 const PKG = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8"));
 
-import { userPort, singleFlight } from "./lib.js";
+import { userPort, singleFlight, serverDepsStamp, needsNativeRebuild } from "./lib.js";
 const PORT = parseInt(process.env.VECTOR_MEMORY_PORT || String(userPort(EXPECTED_USER)), 10);
 const SERVER_URL = `http://127.0.0.1:${PORT}`;
 const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
+const SERVER_LOG = join(COPILOT_DIR, "vector-memory-server.log");
+const SERVER_LOG_MAX_BYTES = 1_000_000;
 
 // --- Server dependency management ---
 // In npx mode, server-only deps (onnxruntime, better-sqlite3, etc.) are NOT in
@@ -28,13 +30,19 @@ const PID_FILE = join(COPILOT_DIR, "vector-memory.pid");
 const SERVER_DEPS_DIR = join(__dirname, ".server");
 const SERVER_DEPS_JSON = join(__dirname, "server-deps.json");
 const SERVER_FILES = ["vector-memory-server.js", "embed-worker.js", "embed-pool.js", "lib.js"];
+const SERVER_DEPS_STAMP_FILE = join(SERVER_DEPS_DIR, ".version");
+const NODE_ABI = process.versions.modules;
 
-/** Check if server deps are available (either in node_modules or .server/) */
+function readServerDepsStamp() {
+  try {
+    return readFileSync(SERVER_DEPS_STAMP_FILE, "utf-8").trim();
+  } catch { return null; }
+}
+
+/** Check if server deps are available (either in node_modules or .server/) for this Node ABI */
 function serverDepsInstalled() {
   if (existsSync(join(__dirname, "node_modules", "better-sqlite3"))) return true;
-  try {
-    return readFileSync(join(SERVER_DEPS_DIR, ".version"), "utf-8").trim() === PKG.version;
-  } catch { return false; }
+  return readServerDepsStamp() === serverDepsStamp(PKG.version, NODE_ABI);
 }
 
 /** Return the directory the server should run from */
@@ -67,8 +75,16 @@ function installServerDeps() {
         copyFileSync(join(__dirname, file), join(SERVER_DEPS_DIR, file));
       }
 
-      process.stderr.write("[vector-memory] Installing server dependencies (one-time setup)...\n");
-      const child = spawn("npm", ["install", "--production", "--no-audit", "--no-fund"], {
+      // After a Node upgrade, `npm install` keeps native binaries built for the old ABI
+      // (better-sqlite3 then fails to load and the server dies), so rebuild them too.
+      const rebuild = needsNativeRebuild(readServerDepsStamp(), NODE_ABI);
+      const command = "npm install --omit=dev --no-audit --no-fund" + (rebuild ? " && npm rebuild" : "");
+      process.stderr.write(
+        rebuild
+          ? `[vector-memory] Node changed (ABI ${NODE_ABI}); reinstalling and rebuilding server dependencies...\n`
+          : "[vector-memory] Installing server dependencies (one-time setup)...\n"
+      );
+      const child = spawn(command, {
         cwd: SERVER_DEPS_DIR,
         stdio: "pipe",
         shell: true,
@@ -77,7 +93,7 @@ function installServerDeps() {
 
       child.on("close", (code) => {
         if (code === 0) {
-          writeFileSync(join(SERVER_DEPS_DIR, ".version"), PKG.version);
+          writeFileSync(SERVER_DEPS_STAMP_FILE, serverDepsStamp(PKG.version, NODE_ABI));
           process.stderr.write("[vector-memory] Server dependencies installed.\n");
         } else {
           process.stderr.write(`[vector-memory] npm install failed (exit ${code}). Will retry.\n`);
@@ -195,12 +211,21 @@ async function launchServerIfNeeded() {
   // Launch server detached from the correct directory
   const serverDir = getServerDir();
   const serverPath = join(serverDir, "vector-memory-server.js");
+  // The server is detached, so its stderr is the only record of why it died: keep it.
+  let logFd = "ignore";
+  try {
+    mkdirSync(COPILOT_DIR, { recursive: true });
+    let mode = "a";
+    try { if (statSync(SERVER_LOG).size > SERVER_LOG_MAX_BYTES) mode = "w"; } catch { /* no log yet */ }
+    logFd = openSync(SERVER_LOG, mode);
+  } catch { /* logging is best-effort */ }
   const child = spawn(process.execPath, [serverPath], {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
     windowsHide: true,
     env: { ...process.env, VECTOR_MEMORY_PORT: String(PORT) },
   });
+  if (typeof logFd === "number") closeSync(logFd);
   child.unref();
 }
 
@@ -249,7 +274,8 @@ function callServer(path, body) {
 // On first run the model download can take several minutes — we wait up to 5 min.
 const WARMUP_MSG =
   "⏳ Vector memory server is still starting up (first launch installs server dependencies " +
-  "and downloads a ~34 MB ML model — this is a one-time cost). Try again in a minute or two.";
+  "and downloads a ~34 MB ML model — this is a one-time cost). Try again in a minute or two. " +
+  `If this keeps happening, the server's log is at ${SERVER_LOG}.`;
 
 async function callServerWithRetry(path, body) {
   try {

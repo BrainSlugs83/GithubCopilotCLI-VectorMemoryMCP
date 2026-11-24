@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
-import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, userPort, BASE_PORT, MIN_SCORE, createHandler, memoizeAsync, singleFlight, purgeIncompleteModel, markModelComplete } from "./lib.js";
+import { filterUnindexed, dedup, postProcessResults, isOurServer, isIndexable, userPort, BASE_PORT, MIN_SCORE, createHandler, memoizeAsync, singleFlight, purgeIncompleteModel, markModelComplete, serverDepsStamp, needsNativeRebuild } from "./lib.js";
 import { createEmbedPool } from "./embed-pool.js";
 
 // --- Mock helpers for handler tests ---
@@ -1046,5 +1046,27 @@ describe("singleFlight", () => {
     const launch = singleFlight(async () => { if (++calls === 1) throw new Error("boom"); return calls; });
     await assert.rejects(launch, /boom/);
     assert.equal(await launch(), 2);
+  });
+});
+
+describe("serverDepsStamp / needsNativeRebuild", () => {
+  it("stamps the package version and the Node ABI", () => {
+    assert.equal(serverDepsStamp("1.6.1", "147"), "1.6.1 node-abi-147");
+  });
+
+  it("does not rebuild a first install (nothing installed yet)", () => {
+    assert.equal(needsNativeRebuild(null, "147"), false);
+  });
+
+  it("does not rebuild when only the package version changed", () => {
+    assert.equal(needsNativeRebuild("1.6.0 node-abi-147", "147"), false);
+  });
+
+  it("rebuilds after a Node upgrade changed the ABI", () => {
+    assert.equal(needsNativeRebuild("1.6.1 node-abi-137", "147"), true);
+  });
+
+  it("rebuilds a legacy stamp that never recorded an ABI", () => {
+    assert.equal(needsNativeRebuild("1.6.0", "147"), true);
   });
 });

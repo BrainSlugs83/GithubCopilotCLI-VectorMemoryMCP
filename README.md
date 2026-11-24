@@ -253,6 +253,13 @@ This is expected! On first launch, the server needs to:
 
 This can take **2–5 minutes** depending on your connection speed and whether native compilation is needed. Subsequent launches start in seconds.
 
+### Searches time out or say the server is still starting
+
+The background server writes its output to `~/.copilot/vector-memory-server.log` (or `$VECTOR_MEMORY_DATA_DIR/vector-memory-server.log`). Check it first. The server repairs these known causes on its own:
+
+- **Node was upgraded:** native dependencies built for the old Node ABI fail to load. The proxy records the Node ABI next to the installed server deps and rebuilds them when it changes.
+- **Interrupted model download:** a model that never finished downloading (no `.complete` marker) is deleted and downloaded again on the next start.
+
 ### Port collision with another user
 
 **Error:** `Port 31796 is owned by user "X" (expected "Y")`
